@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import { pool } from "./db.js";
+import { authRouter } from "./auth.js";
 
 const app = express();
 app.use(express.json());
@@ -11,7 +12,7 @@ const origins = (process.env.FRONT_ORIGINS || "http://localhost:5173")
   .split(",")
   .map((item) => item.trim())
   .filter(Boolean);
-app.use(cors({ origin: origins }));
+app.use(cors({ origin: (origin, done) => done(null, !origin || origins.includes(origin) || /\.app\.github\.dev$/.test(origin)) }));
 
 app.get("/", (_req, res) => {
   res.json({ name: "maf-game-backend", ok: true });
@@ -30,7 +31,7 @@ app.get("/health", async (_req, res) => {
   }
 });
 
-// Ici viendront les routes : /api/register, /api/login, ...
+app.use("/api", authRouter); // /api/register, /api/login, /api/me
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => {

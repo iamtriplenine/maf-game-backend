@@ -1,0 +1,12 @@
+MAF BACKEND : comptes (pseudo + code a 10 chiffres)
+===================================================
+1. Dezippe ce dossier (maf-backend-patch) A LA RACINE de maf-backend (a cote de server.js).
+2. Dans PowerShell, depuis la racine de maf-backend :
+
+   powershell -ExecutionPolicy Bypass -File .\maf-backend-patch\appliquer-backend.ps1
+
+3. git add . ; git commit -m "comptes" ; git push   (Render redeploie tout seul)
+
+La table maf_users est creee automatiquement au premier appel.
+Optionnel sur Render : variable TOKEN_SECRET (une longue phrase au hasard).
+IMPORTANT : FRONT_ORIGINS sur Render doit contenir l'adresse de ton site (ex: https://ton-site.vercel.app).
