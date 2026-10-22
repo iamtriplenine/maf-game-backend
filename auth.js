@@ -34,6 +34,9 @@ export function ensureTable() {
            created_at timestamptz not null default now()
          )`
       )
+      .then(() => pool.query(
+        "alter table maf_users add column if not exists skin_id text not null default 'loki'"
+      ))
       .catch((error) => {
         tableReady = null;
         throw error;
@@ -94,6 +97,7 @@ function addFailure(key) {
 
 export const publicUser = (row) => ({
   id: row.id, pseudo: row.pseudo, balance: row.balance,
+  skin_id: row.skin_id || "loki",
   bonus_balance: row.bonus_balance || 0, phone: row.phone || null,
   phone_registered_at: row.phone_registered_at || null,
   phone_verification_deadline: row.phone_verification_deadline || null,
@@ -191,3 +195,24 @@ export function requireSession(req, res, next) {
   req.userId = data.uid;
   next();
 }
+
+// Le catalogue est actuellement gratuit. Validation cote serveur pour eviter
+// d'enregistrer un chemin de modele arbitraire.
+const ALLOWED_SKINS = new Set(["loki", "bailarina", "samba", "messi"]);
+authRouter.patch("/skin", requireSession, async (req, res) => {
+  const skinId = req.body?.skin_id;
+  if (typeof skinId !== "string" || !ALLOWED_SKINS.has(skinId)) {
+    return fail(res, 400, "Skin inconnu.");
+  }
+  try {
+    const result = await pool.query(
+      "update maf_users set skin_id = $1 where id = $2 returning *",
+      [skinId, req.userId]
+    );
+    if (!result.rows[0]) return fail(res, 401, "Compte introuvable.");
+    res.json({ user: publicUser(result.rows[0]) });
+  } catch (error) {
+    console.error("skin :", error.message);
+    fail(res, 500, "Impossible d'enregistrer le skin.");
+  }
+});
