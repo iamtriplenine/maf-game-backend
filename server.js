@@ -1,10 +1,11 @@
 import express from "express";
 import cors from "cors";
+import { walletRouter } from "./wallet.js";
 import { pool } from "./db.js";
 import { authRouter } from "./auth.js";
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "3mb" }));
 
 // Adresses du site autorisees a appeler ce serveur (separees par des virgules).
 // Sur Render : variable FRONT_ORIGINS. En local : http://localhost:5173
@@ -32,6 +33,14 @@ app.get("/health", async (_req, res) => {
 });
 
 app.use("/api", authRouter); // /api/register, /api/login, /api/me
+
+app.use("/api", walletRouter);
+app.use((error, _req, res, _next) => {
+  if (error.type === "entity.too.large") return res.status(413).json({ error: "Capture trop volumineuse (2 Mo maximum)." });
+  if (error.type === "entity.parse.failed") return res.status(400).json({ error: "JSON invalide." });
+  console.error(error.message);
+  res.status(500).json({ error: "Erreur serveur." });
+});
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => {

@@ -19,7 +19,7 @@ const CODE_RE = /^\d{10}$/;
 
 // ---------- table creee automatiquement au premier appel ----------
 let tableReady = null;
-function ensureTable() {
+export function ensureTable() {
   if (!tableReady) {
     tableReady = pool
       .query(
@@ -51,7 +51,7 @@ function makeToken(userId) {
   return `${payload}.${sign(payload)}`;
 }
 
-function readToken(token) {
+export function readToken(token) {
   if (typeof token !== "string") return null;
   const [payload, signature] = token.split(".");
   if (!payload || !signature) return null;
@@ -92,7 +92,13 @@ function addFailure(key) {
   else entry.count += 1;
 }
 
-const publicUser = (row) => ({ id: row.id, pseudo: row.pseudo, balance: row.balance });
+export const publicUser = (row) => ({
+  id: row.id, pseudo: row.pseudo, balance: row.balance,
+  bonus_balance: row.bonus_balance || 0, phone: row.phone || null,
+  phone_registered_at: row.phone_registered_at || null,
+  phone_verification_deadline: row.phone_verification_deadline || null,
+  phone_verified_at: row.phone_verified_at || null,
+});
 const fail = (res, status, error) => res.status(status).json({ error });
 
 function checkInput(body) {
@@ -126,7 +132,7 @@ authRouter.post("/register", async (req, res) => {
     const hash = await hashCode(input.code, salt);
     const result = await pool.query(
       `insert into maf_users (pseudo, pseudo_key, code_salt, code_hash)
-       values ($1, $2, $3, $4) returning id, pseudo, balance`,
+       values ($1, $2, $3, $4) returning *`,
       [input.pseudo, input.pseudoKey, salt, hash]
     );
     const user = publicUser(result.rows[0]);
@@ -169,7 +175,7 @@ authRouter.get("/me", async (req, res) => {
   const data = readToken(auth.startsWith("Bearer ") ? auth.slice(7) : "");
   if (!data) return fail(res, 401, "Session expiree.");
   try {
-    const result = await pool.query("select id, pseudo, balance from maf_users where id = $1", [data.uid]);
+    const result = await pool.query("select * from maf_users where id = $1", [data.uid]);
     if (!result.rows[0]) return fail(res, 401, "Compte introuvable.");
     res.json({ user: publicUser(result.rows[0]) });
   } catch (error) {
@@ -177,3 +183,11 @@ authRouter.get("/me", async (req, res) => {
     fail(res, 500, "Erreur serveur, reessaie.");
   }
 });
+
+export function requireSession(req, res, next) {
+  const auth = String(req.headers.authorization || "");
+  const data = readToken(auth.startsWith("Bearer ") ? auth.slice(7) : "");
+  if (!data || !Number.isSafeInteger(data.uid)) return res.status(401).json({ error: "Session expiree." });
+  req.userId = data.uid;
+  next();
+}
