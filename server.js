@@ -38,7 +38,7 @@ app.use("/api", authRouter); // /api/register, /api/login, /api/me
 
 app.use("/api", chatRouter); // /api/chat
 
-app.use("/api/rooms", roomsRouter); // Salons publics (etape 1)
+app.use("/api/rooms", roomsRouter); // Salons et tir au but (etape 2)
 
 app.use("/api", walletRouter);
 app.use((error, _req, res, _next) => {

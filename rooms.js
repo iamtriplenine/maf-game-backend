@@ -1,15 +1,17 @@
-// MARV GAME — Salons publics (etape 1/2).
-// Les mises sont des propositions de test : cette API ne touche JAMAIS au portefeuille.
-// Le resultat du match et les paiements devront etre ajoutes cote serveur en etape 2.
+// MARV GAME — Salons et tir au but (etape 2/2).
+// Les mises et gains sont SIMULES : aucune operation de portefeuille.
 import crypto from 'node:crypto';
 import { Router } from 'express';
 import { pool } from './db.js';
 import { ensureTable, readToken, requireSession } from './auth.js';
+import { blankMatch, roleFor, recordChoice } from './penaltyEngine.js';
 
 export const roomsRouter = Router();
 const allowedShots = new Set([3, 5, 10]);
 const ROOM_LIFETIME = '24 hours';
 const CODE_PATTERN = /^\d{4}$/;
+const directions = new Set(['left', 'center', 'right']);
+const activeStatuses = ['open', 'pending', 'ready', 'playing'];
 const fail = (status, message) => Object.assign(new Error(message), { status });
 const respond = (fn) => async (req, res, next) => {
   try { await fn(req, res); }
@@ -38,16 +40,28 @@ export function ensureRooms() {
           game text NOT NULL CHECK(game IN ('penalty')),
           shots smallint NOT NULL CHECK(shots IN (3, 5, 10)),
           stake integer NOT NULL CHECK(stake BETWEEN 100 AND 1000000),
-          status text NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'pending', 'ready', 'closed')),
+          status text NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'pending', 'ready', 'playing', 'finished', 'closed')),
           created_at timestamptz NOT NULL DEFAULT now(),
           updated_at timestamptz NOT NULL DEFAULT now(),
           closed_at timestamptz,
+          match_state jsonb,
           CHECK(guest_id IS NULL OR guest_id <> host_id),
-          CHECK(status NOT IN ('pending','ready') OR guest_id IS NOT NULL),
+          CHECK(status NOT IN ('pending','ready','playing','finished') OR guest_id IS NOT NULL),
           CHECK(status <> 'open' OR guest_id IS NULL)
         );
-        CREATE UNIQUE INDEX IF NOT EXISTS maf_rooms_unique_active_code
-          ON maf_rooms(code) WHERE status <> 'closed';
+      `);
+      // Mise a niveau automatique des tables creees a l'etape 1.
+      await client.query(`
+        ALTER TABLE maf_rooms ADD COLUMN IF NOT EXISTS match_state jsonb;
+        ALTER TABLE maf_rooms DROP CONSTRAINT IF EXISTS maf_rooms_status_check;
+        ALTER TABLE maf_rooms ADD CONSTRAINT maf_rooms_status_check
+          CHECK(status IN ('open', 'pending', 'ready', 'playing', 'finished', 'closed'));
+        ALTER TABLE maf_rooms DROP CONSTRAINT IF EXISTS maf_rooms_guest_presence_check;
+        ALTER TABLE maf_rooms ADD CONSTRAINT maf_rooms_guest_presence_check
+          CHECK(status NOT IN ('pending','ready','playing','finished') OR guest_id IS NOT NULL);
+        DROP INDEX IF EXISTS maf_rooms_unique_active_code;
+        CREATE UNIQUE INDEX maf_rooms_unique_active_code ON maf_rooms(code)
+          WHERE status IN ('open','pending','ready','playing');
         CREATE INDEX IF NOT EXISTS maf_rooms_public_recent
           ON maf_rooms(created_at DESC) WHERE status IN ('open','pending');
         CREATE INDEX IF NOT EXISTS maf_rooms_host_active
@@ -66,7 +80,7 @@ export function ensureRooms() {
 // S'applique egalement aux salons qui attendaient le lancement du jeu.
 async function expireRooms(client) {
   await client.query(`UPDATE maf_rooms SET status='closed', closed_at=now(), updated_at=now()
-    WHERE status <> 'closed' AND updated_at < now() - interval '${ROOM_LIFETIME}'`);
+    WHERE status IN ('open','pending','ready','playing') AND updated_at < now() - interval '${ROOM_LIFETIME}'`);
 }
 
 async function transaction(fn) {
@@ -113,7 +127,7 @@ async function load(client, id) {
 }
 async function activeMembership(client, uid) {
   const { rows } = await client.query(`SELECT id FROM maf_rooms
-    WHERE status <> 'closed' AND (host_id=$1 OR guest_id=$1) LIMIT 1`, [uid]);
+    WHERE status IN ('open','pending','ready','playing') AND (host_id=$1 OR guest_id=$1) LIMIT 1`, [uid]);
   return rows[0] || null;
 }
 
@@ -135,7 +149,7 @@ roomsRouter.get('/', respond(async (req, res) => {
 roomsRouter.get('/mine', requireSession, respond(async (req, res) => {
   await expireRooms(pool);
   const { rows } = await pool.query(`${SELECT}
-    WHERE r.status <> 'closed' AND (r.host_id=$1 OR r.guest_id=$1)
+    WHERE r.status IN ('open','pending','ready','playing') AND (r.host_id=$1 OR r.guest_id=$1)
     ORDER BY r.updated_at DESC LIMIT 1`, [req.userId]);
   res.json({ room: rows[0] ? shown(rows[0], req.userId) : null });
 }));
@@ -144,11 +158,11 @@ roomsRouter.get('/mine', requireSession, respond(async (req, res) => {
 roomsRouter.get('/code/:code', respond(async (req, res) => {
   if (!CODE_PATTERN.test(req.params.code)) throw fail(400, 'Le code doit avoir 4 chiffres.');
   await expireRooms(pool);
-  const { rows } = await pool.query(`${SELECT} WHERE r.code=$1 AND r.status <> 'closed'`, [req.params.code]);
+  const { rows } = await pool.query(`${SELECT} WHERE r.code=$1 AND r.status IN ('open','pending','ready','playing')`, [req.params.code]);
   const room = rows[0];
   if (!room) throw fail(404, 'Aucun salon actif avec ce code.');
   const viewer = optionalViewer(req);
-  if (room.status === 'ready' && ![room.host_id, room.guest_id].includes(viewer))
+  if (['ready','playing','finished'].includes(room.status) && ![room.host_id, room.guest_id].includes(viewer))
     throw fail(404, 'Ce salon a deja ses deux joueurs.');
   res.json({ room: shown(room, viewer) });
 }));
@@ -160,7 +174,7 @@ roomsRouter.get('/:id', respond(async (req, res) => {
   const room = rows[0];
   if (!room || room.status === 'closed') throw fail(404, 'Salon introuvable ou ferme.');
   const viewer = optionalViewer(req);
-  if (room.status === 'ready' && ![room.host_id, room.guest_id].includes(viewer))
+  if (['ready','playing','finished'].includes(room.status) && ![room.host_id, room.guest_id].includes(viewer))
     throw fail(404, 'Ce salon a deja ses deux joueurs.');
   res.json({ room: shown(room, viewer) });
 }));
@@ -230,12 +244,110 @@ roomsRouter.post('/:id/leave', requireSession, respond(async (req, res) => {
     const original = await load(client, roomId(req.params.id));
     if (original.host_id !== req.userId && original.guest_id !== req.userId)
       throw fail(403, 'Tu ne fais pas partie de ce salon.');
+    if (original.status === 'finished') throw fail(409, 'Match termine. Cree un nouveau salon.');
     if (original.guest_id === req.userId && original.status === 'pending') {
       await client.query(`UPDATE maf_rooms SET guest_id=NULL,status='open',updated_at=now() WHERE id=$1`, [original.id]);
       return null;
     }
+    if (original.status === 'playing') throw fail(409, 'Match en cours : utilise Abandonner le match.');
     await client.query(`UPDATE maf_rooms SET status='closed',closed_at=now(),updated_at=now() WHERE id=$1`, [original.id]);
     return null;
   });
   res.json({ room });
+}));
+
+// ------------ MOTEUR DU MATCH : transactions atomiques, autorite du serveur ------------
+const side = (r, uid) => uid === r.host_id ? 'host' : uid === r.guest_id ? 'guest' : null;
+const other = (key) => key === 'host' ? 'guest' : 'host';
+function visibleMatch(r, uid) {
+  const viewer = side(r, uid);
+  if (!viewer) throw fail(403, 'Tu ne fais pas partie de ce match.');
+  const state = r.match_state;
+  if (!state) return { status: r.status, match: null };
+  const shooter = state.turn % 2 === 0 ? 'host' : 'guest';
+  const role = roleFor(state.turn, viewer);
+  return {
+    status: r.status,
+    match: {
+      turn: state.turn, totalPerPlayer: state.totalPerPlayer,
+      regularPerPlayer: state.regularPerPlayer, overtime: state.overtime,
+      scores: state.scores, history: state.history,
+      winner: state.winner, finished: state.finished, forfeit: state.forfeit || null,
+      viewer, role, shooter,
+      // NE JAMAIS renvoyer le choix de l'adversaire avant la resolution.
+      myChoice: state.pending[role],
+      otherReady: !!state.pending[role === 'shooter' ? 'keeper' : 'shooter'],
+    },
+  };
+}
+
+roomsRouter.get('/:id/match', requireSession, respond(async (req, res) => {
+  const id = roomId(req.params.id);
+  await expireRooms(pool);
+  const { rows } = await pool.query(`${SELECT} WHERE r.id=$1`, [id]);
+  const room = rows[0];
+  if (!room || !['ready','playing','finished'].includes(room.status))
+    throw fail(404, "Le match n'est pas disponible.");
+  if (!side(room, req.userId)) throw fail(403, "Ce match ne t'appartient pas.");
+  res.json({ room: shown(room, req.userId), ...visibleMatch(room, req.userId) });
+}));
+
+roomsRouter.post('/:id/match/start', requireSession, respond(async (req, res) => {
+  const room = await transaction(async (client) => {
+    const r = await load(client, roomId(req.params.id));
+    if (r.host_id !== req.userId) throw fail(403, 'Seul le createur lance le match.');
+    if (r.status !== 'ready') throw fail(409, 'Le match ne peut pas etre lance.');
+    await client.query(`UPDATE maf_rooms SET status='playing', match_state=$2::jsonb,updated_at=now()
+      WHERE id=$1`, [r.id, JSON.stringify(blankMatch(r.shots))]);
+    return load(client, r.id);
+  });
+  res.json({ room: shown(room, req.userId), ...visibleMatch(room, req.userId) });
+}));
+
+roomsRouter.post('/:id/match/choose', requireSession, respond(async (req, res) => {
+  const direction = req.body?.direction;
+  if (!directions.has(direction)) throw fail(400, 'Direction invalide.');
+  const result = await transaction(async (client) => {
+    const r = await load(client, roomId(req.params.id));
+    const viewer = side(r, req.userId);
+    if (!viewer) throw fail(403, 'Tu ne participes pas a ce match.');
+    if (r.status !== 'playing' || !r.match_state) throw fail(409, "Le match n'est plus en cours.");
+    const state = r.match_state;
+    const role = roleFor(state.turn, viewer);
+    if (state.pending[role]) throw fail(409, 'Tu as deja choisi pour ce tir.');
+    recordChoice(state, viewer, direction);
+    const status = state.finished ? 'finished' : 'playing';
+    await client.query(`UPDATE maf_rooms SET status=$2, match_state=$3::jsonb, updated_at=now()
+      WHERE id=$1`, [r.id, status, JSON.stringify(state)]);
+    return load(client, r.id);
+  });
+  res.json({ room: shown(result, req.userId), ...visibleMatch(result, req.userId) });
+}));
+
+roomsRouter.post('/:id/match/forfeit', requireSession, respond(async (req, res) => {
+  const result = await transaction(async (client) => {
+    const r = await load(client, roomId(req.params.id));
+    const viewer = side(r, req.userId);
+    if (!viewer) throw fail(403, 'Tu ne participes pas a ce match.');
+    if (r.status !== 'playing' || !r.match_state) throw fail(409, 'Aucun match a abandonner.');
+    const state = r.match_state;
+    state.winner = other(viewer);
+    state.finished = true;
+    state.forfeit = viewer;
+    state.pending = { shooter: null, keeper: null };
+    await client.query(`UPDATE maf_rooms SET status='finished', match_state=$2::jsonb,
+      updated_at=now() WHERE id=$1`, [r.id, JSON.stringify(state)]);
+    return load(client, r.id);
+  });
+  res.json({ room: shown(result, req.userId), ...visibleMatch(result, req.userId) });
+}));
+
+// Resultats recents, uniquement pour leurs deux joueurs, pendant 7 jours.
+roomsRouter.get('/results/recent', requireSession, respond(async (req, res) => {
+  const { rows } = await pool.query(`${SELECT} WHERE r.status='finished'
+    AND (r.host_id=$1 OR r.guest_id=$1) AND r.updated_at > now() - interval '7 days'
+    ORDER BY r.updated_at DESC LIMIT 10`, [req.userId]);
+  res.json({ rooms: rows.map((r) => ({ ...shown(r, req.userId),
+    result: { winner: r.match_state?.winner, scores: r.match_state?.scores, forfeit: r.match_state?.forfeit || null },
+  })) });
 }));
