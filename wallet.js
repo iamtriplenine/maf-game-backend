@@ -312,28 +312,83 @@ walletRouter.post('/admin/users/:id/verify-phone', route(async (req,res) => {
     await audit(c,req.adminActor,'phone_verified',{ user_id:id,phone:u.phone,note }); return publicUser(updated);
   }); res.json({ user:result });
 }));
+// Un coupon utilise n'est jamais reactive : son compteur et ses utilisations restent conserves.
+const couponStatus = row => row.uses >= row.max_uses || (row.expires_at && new Date(row.expires_at).getTime() <= Date.now())
+  ? 'expired' : row.active ? 'active' : 'disabled';
+const couponView = row => ({ ...row,status:couponStatus(row),
+  expiry_reason:row.uses >= row.max_uses ? 'used' : couponStatus(row) === 'expired' ? 'date' : null });
+const couponStatusSQL = "CASE WHEN uses>=max_uses OR expires_at<=now() THEN 'expired' WHEN active THEN 'active' ELSE 'disabled' END";
+function couponPage(req) {
+  const parse = (value,fallback,max) => {
+    if (value === undefined) return fallback;
+    if (typeof value !== 'string' || !/^\d{1,10}$/.test(value) || Number(value)>max) throw fail(400,'Pagination invalide.');
+    return Number(value);
+  };
+  const limit=parse(req.query.limit,25,100),offset=parse(req.query.offset,0,1000000000);
+  if (limit<1) throw fail(400,'Pagination invalide.');
+  return { limit,offset };
+}
 walletRouter.post('/admin/coupons', route(async (req,res) => {
-  const code = couponCode(req.body.code), { amount:value, currency='F', max_uses=1, expires_at=null } = req.body;
+  const code = couponCode(req.body.code === undefined ? 'MAF-'+crypto.randomBytes(12).toString('hex').toUpperCase() : req.body.code);
+  if (code === (process.env.ADMIN_TEST_ACCESS_CODE || '00999').trim().toUpperCase())
+    throw fail(400,'Ce code est reserve a l acces administrateur.');
+  const { amount:value, currency='F', max_uses=1, expires_at=null } = req.body;
   if (!Number.isSafeInteger(value) || value < 1 || value > MAX || !['F','V'].includes(currency) ||
     !Number.isSafeInteger(max_uses) || max_uses < 1 || max_uses > 100000) throw fail(400,'Parametres du coupon invalides.');
-  if (expires_at !== null && (typeof expires_at !== 'string' || !Number.isFinite(Date.parse(expires_at)) || Date.parse(expires_at) <= Date.now())) throw fail(400,'Date expiration future requise.');
-  const coupon = await tx(async c => {
+  if (expires_at !== null && (typeof expires_at !== 'string' || !Number.isFinite(Date.parse(expires_at))))
+    throw fail(400,'Date expiration invalide.');
+  const result = await tx(async c => {
+    // Meme code + memes parametres : une reponse perdue ne cree pas de second coupon.
+    await c.query('SELECT pg_advisory_xact_lock(62498104)');
+    const prior = (await c.query('SELECT * FROM maf_coupons WHERE code=$1 FOR UPDATE',[code])).rows[0];
+    if (prior) {
+      if (prior.amount !== value || prior.currency !== currency || prior.max_uses !== max_uses ||
+        (prior.expires_at ? new Date(prior.expires_at).getTime() : null) !== (expires_at ? Date.parse(expires_at) : null))
+        throw fail(409,'Ce code existe deja avec d autres parametres.');
+      return { coupon:couponView(prior),already_exists:true };
+    }
+    if (expires_at !== null && Date.parse(expires_at) <= Date.now()) throw fail(400,'Date expiration future requise.');
     const row = (await c.query(`INSERT INTO maf_coupons(code,amount,currency,max_uses,expires_at) VALUES($1,$2,$3,$4,$5) RETURNING *`,[code,value,currency,max_uses,expires_at])).rows[0];
-    await audit(c,req.adminActor,'coupon_created',row); return row;
-  }); res.status(201).json({ coupon });
+    await audit(c,req.adminActor,'coupon_created',row);
+    return { coupon:couponView(row),already_exists:false };
+  }); res.status(result.already_exists ? 200 : 201).json(result);
 }));
 walletRouter.get('/admin/coupons', route(async (req,res) => {
-  const limit = Math.floor(Math.min(100,Math.max(1,Number(req.query.limit)||50)));
-  const offset = Math.floor(Math.max(0,Number(req.query.offset)||0));
-  res.json({ coupons:(await pool.query('SELECT * FROM maf_coupons ORDER BY created_at DESC,code LIMIT $1 OFFSET $2',[limit,offset])).rows });
+  const { limit,offset }=couponPage(req);
+  const status=req.query.status || '';
+  if (typeof status !== 'string' || !['','active','expired','disabled'].includes(status)) throw fail(400,'Filtre invalide.');
+  const { rows } = await pool.query(`WITH entries AS (SELECT c.*,${couponStatusSQL} AS status FROM maf_coupons c),
+    filtered AS (SELECT * FROM entries WHERE ($1::text='' OR status=$1))
+    SELECT (SELECT count(*)::integer FROM filtered) AS total,
+      (SELECT jsonb_build_object('active',count(*) FILTER (WHERE status='active'),
+        'expired',count(*) FILTER (WHERE status='expired'),'disabled',count(*) FILTER (WHERE status='disabled')) FROM entries) AS summary,
+      coalesce((SELECT jsonb_agg(p ORDER BY p.created_at DESC,p.code)
+        FROM (SELECT * FROM filtered ORDER BY created_at DESC,code LIMIT $2 OFFSET $3) p),'[]'::jsonb) AS coupons`,[status,limit,offset]);
+  res.json({ ...rows[0],coupons:rows[0].coupons.map(couponView),limit,offset });
+}));
+walletRouter.get('/admin/coupons/:code/uses', route(async (req,res) => {
+  const code=couponCode(req.params.code), { limit,offset }=couponPage(req);
+  const { rows } = await pool.query(`SELECT c.*,
+    (SELECT count(*)::integer FROM maf_coupon_uses WHERE code=c.code) AS total,
+    coalesce((SELECT jsonb_agg(p ORDER BY p.used_at DESC,p.user_id) FROM (
+      SELECT cu.user_id,u.pseudo,cu.created_at AS used_at FROM maf_coupon_uses cu
+      JOIN maf_users u ON u.id=cu.user_id WHERE cu.code=c.code
+      ORDER BY cu.created_at DESC,cu.user_id LIMIT $2 OFFSET $3) p),'[]'::jsonb) AS redemptions
+    FROM maf_coupons c WHERE c.code=$1`,[code,limit,offset]);
+  if (!rows[0]) throw fail(404,'Coupon introuvable.');
+  const { redemptions,total,...coupon }=rows[0];
+  res.json({ coupon:couponView(coupon),redemptions,total,limit,offset });
 }));
 walletRouter.patch('/admin/coupons/:code', route(async (req,res) => {
   const code = couponCode(req.params.code);
   if (typeof req.body.active !== 'boolean') throw fail(400,'active doit etre true ou false.');
   const coupon = await tx(async c => {
+    const existing=(await c.query('SELECT * FROM maf_coupons WHERE code=$1 FOR UPDATE',[code])).rows[0];
+    if (!existing) throw fail(404,'Coupon introuvable.');
+    if (req.body.active && couponStatus(existing)==='expired') throw fail(409,'Un coupon expire ne peut pas etre reactive.');
+    if (existing.active===req.body.active) return couponView(existing);
     const row = (await c.query('UPDATE maf_coupons SET active=$2 WHERE code=$1 RETURNING *',[code,req.body.active])).rows[0];
-    if (!row) throw fail(404,'Coupon introuvable.');
-    await audit(c,req.adminActor,'coupon_status_changed',{ code,active:row.active }); return row;
+    await audit(c,req.adminActor,'coupon_status_changed',{ code,active:row.active }); return couponView(row);
   }); res.json({ coupon });
 }));
 
