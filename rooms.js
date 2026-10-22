@@ -10,6 +10,7 @@ import { blankMatch, roleFor, recordChoice } from './penaltyEngine.js';
 
 export const roomsRouter = Router();
 const allowedShots = new Set([3, 5, 10]);
+const RETURN_MS = 80_000;
 const ROOM_LIFETIME = '24 hours';
 const CODE_PATTERN = /^\d{4}$/;
 const directions = new Set(['left', 'center', 'right']);
@@ -56,6 +57,7 @@ export function ensureRooms() {
       // Mise a niveau automatique des tables creees a l'etape 1.
       await client.query(`
         ALTER TABLE maf_rooms ADD COLUMN IF NOT EXISTS match_state jsonb;
+        ALTER TABLE maf_rooms ADD COLUMN IF NOT EXISTS departures jsonb NOT NULL DEFAULT '{}'::jsonb;
         ALTER TABLE maf_rooms ADD COLUMN IF NOT EXISTS escrow integer NOT NULL DEFAULT 0;
         ALTER TABLE maf_rooms ADD COLUMN IF NOT EXISTS payout integer NOT NULL DEFAULT 0;
         ALTER TABLE maf_rooms ADD COLUMN IF NOT EXISTS settled_at timestamptz;
@@ -127,7 +129,7 @@ async function lockUsers(client, ids) {
 
 // Match termine : la cagnotte (2 mises) va au gagnant.
 async function settleRoom(client, room, winnerSide) {
-  if (!(room.escrow > 0) || room.settled_at || !winnerSide) return;
+  if (!(room.escrow > 0) || room.settled_at || !['host', 'guest'].includes(winnerSide)) return;
   const winnerId = winnerSide === 'host' ? room.host_id : room.guest_id;
   await lockUsers(client, [room.host_id, room.guest_id]);
   await client.query('UPDATE maf_users SET balance=balance+$2 WHERE id=$1', [winnerId, room.escrow]);
@@ -155,12 +157,43 @@ async function transaction(fn) {
     await client.query('BEGIN');
     // Verrou global sur les transitions de salon : codes et places ne se chevauchent pas.
     await client.query('SELECT pg_advisory_xact_lock(62498133)');
+    await resolveDepartures(client);
     await expireRooms(client);
     const result = await fn(client);
     await client.query('COMMIT');
     return result;
   } catch (error) { await client.query('ROLLBACK'); throw error; }
   finally { client.release(); }
+}
+
+// Server-owned deadlines survive reloads and restarts. All transitions share the room lock.
+async function resolveDepartures(client) {
+  const { rows } = await client.query(`SELECT * FROM maf_rooms
+    WHERE (status='playing' AND departures <> '{}'::jsonb)
+       OR (status='finished' AND escrow > 0 AND settled_at IS NULL)
+    ORDER BY id FOR UPDATE`);
+  for (const room of rows) {
+    if (room.status === 'playing') {
+      const due = Object.entries(room.departures || {})
+        .filter(([key, deadline]) => ['host','guest'].includes(key) && Number.isFinite(deadline) && deadline <= Date.now())
+        .sort((a,b) => a[1]-b[1] || a[0].localeCompare(b[0]));
+      if (!due.length || !room.match_state) continue;
+      const loser = due[0][0];
+      const state = { ...room.match_state, finished:true, winner:loser === 'host' ? 'guest' : 'host',
+        forfeit:loser, forfeitReason:'return_timeout', pending:{shooter:null,keeper:null} };
+      await client.query(`UPDATE maf_rooms SET status='finished', match_state=$2::jsonb,
+        departures='{}'::jsonb, updated_at=now() WHERE id=$1`, [room.id, JSON.stringify(state)]);
+      await settleRoom(client, room, state.winner);
+    } else {
+      // Recover a recorded result only when its money is still held and was never paid.
+      await settleRoom(client, room, room.match_state?.winner);
+    }
+  }
+}
+export async function maintainRooms() {
+  if (!pool) return;
+  await ensureRooms();
+  await transaction(async () => {});
 }
 
 // Liste des salons : uniquement des identites publiques et aucune donnee sensible.
@@ -186,6 +219,8 @@ const shown = (row, viewerId = null) => ({
   guest: viewerId && [row.host_id, row.guest_id].includes(viewerId) && row.guest_id
     ? { id: row.guest_id, pseudo: row.guest_pseudo } : null,
   escrow: row.escrow || 0, payout: row.payout || 0,
+  return_deadline: viewerId === row.host_id ? row.departures?.host ?? null : viewerId === row.guest_id ? row.departures?.guest ?? null : null,
+  server_now: Date.now(),
   funds_alert: fundsAlert(row, viewerId),
   is_host: viewerId === row.host_id,
   is_guest: viewerId != null && viewerId === row.guest_id,
@@ -213,7 +248,7 @@ async function activeMembership(client, uid) {
 
 roomsRouter.use((req, res, next) => {
   if (!pool) return res.status(503).json({ error: 'Base de donnees non configuree.' });
-  ensureRooms().then(() => next(), next);
+  maintainRooms().then(() => next(), next);
 });
 roomsRouter.use((_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 
@@ -386,6 +421,8 @@ function visibleMatch(r, uid) {
       scores: state.scores, history: state.history,
       winner: state.winner, finished: state.finished, forfeit: state.forfeit || null,
       viewer, role, shooter,
+      opponentReturnDeadline: r.departures?.[other(viewer)] ?? null,
+      returnDeadline: r.departures?.[viewer] ?? null, serverNow: Date.now(),
       // NE JAMAIS renvoyer le choix de l'adversaire avant la resolution.
       myChoice: state.pending[role],
       otherReady: !!state.pending[role === 'shooter' ? 'keeper' : 'shooter'],
@@ -403,6 +440,25 @@ roomsRouter.get('/:id/match', requireSession, respond(async (req, res) => {
   if (!side(room, req.userId)) throw fail(403, "Ce match ne t'appartient pas.");
   res.json({ room: shown(room, req.userId), ...visibleMatch(room, req.userId) });
 }));
+
+// Explicit temporary exit: retries never extend the original deadline.
+for (const action of ['exit', 'resume']) {
+  roomsRouter.post(`/:id/match/${action}`, requireSession, respond(async (req, res) => {
+    const room = await transaction(async (client) => {
+      const r = await load(client, roomId(req.params.id));
+      const viewer = side(r, req.userId);
+      if (!viewer) throw fail(403, 'Tu ne participes pas a ce match.');
+      if (r.status === 'playing') {
+        const departures = { ...r.departures };
+        if (action === 'exit') departures[viewer] ??= Date.now() + RETURN_MS;
+        else delete departures[viewer];
+        await client.query('UPDATE maf_rooms SET departures=$2::jsonb,updated_at=now() WHERE id=$1', [r.id, JSON.stringify(departures)]);
+      }
+      return load(client, r.id);
+    });
+    res.json({ room:shown(room,req.userId), ...visibleMatch(room,req.userId) });
+  }));
+}
 
 roomsRouter.post('/:id/match/start', requireSession, respond(async (req, res) => {
   const room = await transaction(async (client) => {
@@ -425,6 +481,7 @@ roomsRouter.post('/:id/match/choose', requireSession, respond(async (req, res) =
     if (!viewer) throw fail(403, 'Tu ne participes pas a ce match.');
     if (r.status !== 'playing' || !r.match_state) throw fail(409, "Le match n'est plus en cours.");
     const state = r.match_state;
+    if (r.departures?.[viewer]) throw fail(409, 'Reviens dans le match avant de jouer.');
     const role = roleFor(state.turn, viewer);
     if (state.pending[role]) throw fail(409, 'Tu as deja choisi pour ce tir.');
     recordChoice(state, viewer, direction);

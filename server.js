@@ -4,7 +4,7 @@ import { walletRouter } from "./wallet.js";
 import { pool } from "./db.js";
 import { authRouter } from "./auth.js";
 import { chatRouter } from "./chat.js";
-import { roomsRouter } from "./rooms.js";
+import { roomsRouter, maintainRooms } from "./rooms.js";
 import { historyRouter } from "./history.js";
 
 const app = express();
@@ -54,3 +54,6 @@ const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`Serveur pret sur le port ${port}`);
 });
+// Also settle timeouts when both players have left the screen.
+setInterval(() => { void maintainRooms().catch(error => console.error("room maintenance:", error.message)); }, 1000).unref();
+void maintainRooms().catch(error => console.error("room maintenance:", error.message));
