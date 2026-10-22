@@ -35,10 +35,10 @@ historyRouter.use((_req,_res,next) => { ensureRooms().then(() => next(),next); }
 const transactions = `
   SELECT 'wallet:' || t.id::text AS id,t.kind,t.amount,t.currency,t.status,
     CASE WHEN t.kind='deposit' AND t.status='approved' THEN t.amount
-      WHEN t.kind='withdrawal' AND t.status IN ('pending','approved') THEN -(t.amount+coalesce(t.fee_amount,0)) ELSE 0 END AS delta,
+      WHEN t.kind='withdrawal' AND t.status IN ('pending','approved') THEN -(t.amount+coalesce(t.fee_amount,0)+coalesce(t.owner_fee_amount,0)) ELSE 0 END AS delta,
     t.phone,t.admin_note AS note,t.payment_reference AS reference,
     t.created_at,t.decided_at,NULL::text AS room_code,
-    coalesce(t.fee_amount,0)::integer AS fee_amount,(t.amount+coalesce(t.fee_amount,0))::integer AS total_amount
+    coalesce(t.fee_amount,0)::integer AS fee_amount,(t.amount+coalesce(t.fee_amount,0)+coalesce(t.owner_fee_amount,0))::integer AS total_amount
   FROM maf_transactions t WHERE t.user_id=$1
   UNION ALL
   SELECT 'coupon:' || cu.code,'coupon',c.amount,c.currency,'approved',c.amount,

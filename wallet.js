@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { feeFor } from './walletFees.js';
+import { withdrawalFees } from './ownerFees.js';
 import { createTestAdminAccess, adminActor } from './adminAccess.js';
 import { Router } from 'express';
 import { pool } from './db.js';
@@ -47,6 +48,17 @@ export function ensureWallet() {
           CHECK(currency IN ('F','V'));
         -- Les operations precedentes restent avec 0 F de frais (pas de retroactivite).
         ALTER TABLE maf_transactions ADD COLUMN IF NOT EXISTS fee_amount integer NOT NULL DEFAULT 0;
+        -- Zero par defaut : les retraits crees avant la mise a jour ne sont pas recalcules.
+        ALTER TABLE maf_transactions ADD COLUMN IF NOT EXISTS owner_fee_amount integer NOT NULL DEFAULT 0;
+        CREATE TABLE IF NOT EXISTS maf_owner_commissions (
+          transaction_id uuid PRIMARY KEY REFERENCES maf_transactions(id),
+          owner_id integer NOT NULL REFERENCES maf_users(id),
+          player_id integer NOT NULL REFERENCES maf_users(id),
+          amount integer NOT NULL CHECK (amount > 0),
+          currency text NOT NULL CHECK (currency IN ('F','V')),
+          created_at timestamptz NOT NULL DEFAULT now()
+        );
+        CREATE INDEX IF NOT EXISTS maf_owner_commissions_owner_date ON maf_owner_commissions(owner_id,created_at DESC);
         CREATE INDEX IF NOT EXISTS maf_transactions_user_created ON maf_transactions(user_id, created_at DESC);
         CREATE INDEX IF NOT EXISTS maf_transactions_status ON maf_transactions(status);
         CREATE TABLE IF NOT EXISTS maf_coupons (
@@ -111,8 +123,9 @@ export function waveUrl(value) {
 const view = row => {
   const { proof, proof_hash, request_key, ...safe } = row;
   const fee = Number(row.fee_amount ?? 0);
-  const total = Number(row.amount) + fee;
-  return { ...safe, fee_amount:fee, total_amount:total, has_proof: Boolean(proof_hash),
+  const ownerFee = Number(row.owner_fee_amount ?? 0);
+  const total = Number(row.amount) + fee + ownerFee;
+  return { ...safe, fee_amount:fee, owner_fee_amount:ownerFee, total_amount:total, has_proof: Boolean(proof_hash),
     ...(row.kind === 'deposit' ? { payment_url: waveUrl(total) } : {}) };
 };
 export function parseProof(value) {
@@ -145,6 +158,27 @@ walletRouter.get('/wallet', route(async (req,res) => {
   if (!result.rows[0]) throw fail(401, 'Compte introuvable.');
   res.json({ user: publicUser(result.rows[0]) });
 }));
+// Uniquement au vrai compte 999 connecte, pas aux autres joueurs ni au code admin de test.
+walletRouter.get('/wallet/owner-commissions', route(async (req,res) => {
+  const owner = (await pool.query('SELECT id,pseudo_key,bonus_balance FROM maf_users WHERE id=$1',[req.userId])).rows[0];
+  if (!owner || owner.pseudo_key !== '999') throw fail(403,'Reservé au compte proprietaire.');
+  const { rows: [s] } = await pool.query(`
+    SELECT coalesce(sum(amount),0)::bigint AS total,
+      coalesce(sum(amount) FILTER (WHERE (created_at AT TIME ZONE 'Africa/Abidjan')::date = (now() AT TIME ZONE 'Africa/Abidjan')::date),0)::bigint AS today,
+      coalesce(sum(amount) FILTER (WHERE (created_at AT TIME ZONE 'Africa/Abidjan')::date >= (now() AT TIME ZONE 'Africa/Abidjan')::date - 6),0)::bigint AS last_7_days,
+      count(*)::integer AS withdrawal_count
+    FROM maf_owner_commissions WHERE owner_id=$1`,[owner.id]);
+  const { rows } = await pool.query(`
+    SELECT (created_at AT TIME ZONE 'Africa/Abidjan')::date AS date,
+      sum(amount)::bigint AS amount,count(*)::integer AS withdrawals
+    FROM maf_owner_commissions WHERE owner_id=$1
+    GROUP BY (created_at AT TIME ZONE 'Africa/Abidjan')::date
+    ORDER BY date DESC LIMIT 30`,[owner.id]);
+  res.set('Cache-Control','no-store');
+  res.json({ owner_bonus_balance:Number(owner.bonus_balance),today:Number(s.today),
+    last_7_days:Number(s.last_7_days),total:Number(s.total),withdrawal_count:s.withdrawal_count,
+    daily:rows.map(r=>({date:r.date,amount:Number(r.amount),withdrawals:r.withdrawals})) });
+}));
 walletRouter.post('/wallet/phone', route(async (req,res) => {
   const phone = normalizePhone(req.body.phone);
   if (req.body.accepted !== true) throw fail(400, 'Confirme que ce numero sera definitif.');
@@ -170,7 +204,10 @@ walletRouter.get('/wallet/withdrawal-info', route(async (req,res) => {
 }));
 for (const kind of ['deposit','withdrawal']) {
   walletRouter.post(`/wallet/${kind}s`, route(async (req,res) => {
-    const value = amount(req.body.amount), transactionFee = feeFor(value), debit = value + transactionFee, requestKey = key(req.body.request_key);
+    const value = amount(req.body.amount),
+      breakdown = kind === 'withdrawal' ? withdrawalFees(value) : { fee_amount:feeFor(value),owner_fee_amount:0 },
+      transactionFee = breakdown.fee_amount, ownerFee = breakdown.owner_fee_amount,
+      debit = value + transactionFee + ownerFee, requestKey = key(req.body.request_key);
     const currency = req.body.currency ?? 'F';
     if (!['F','V'].includes(currency) || kind === 'deposit' && currency !== 'F')
       throw fail(400,'Choisis le solde argent (F) ou bonus (V).');
@@ -187,14 +224,17 @@ for (const kind of ['deposit','withdrawal']) {
       if (kind === 'withdrawal') {
         const deposited = await c.query("SELECT 1 FROM maf_transactions WHERE user_id=$1 AND kind='deposit' AND status='approved' LIMIT 1",[u.id]);
         if (!deposited.rowCount) throw fail(409,'Effectue un premier depot confirme avant de retirer.');
+        // Le compte 999 doit exister AVANT de debiter un joueur.
+        const ownerAccount = await c.query('SELECT id FROM maf_users WHERE pseudo_key=$1',['999']);
+        if (!ownerAccount.rowCount) throw fail(503,'Compte de commission indisponible. Reessaie plus tard.');
         const column = currency === 'V' ? 'bonus_balance' : 'balance';
-        if (u[column] < debit) throw fail(409,currency === 'V' ? 'Solde bonus insuffisant (retrait + frais de 1 %).' : 'Solde argent insuffisant (retrait + frais de 1 %).');
+        if (u[column] < debit) throw fail(409,currency === 'V' ? 'Solde bonus insuffisant (retrait + frais de 19 %).' : 'Solde argent insuffisant (retrait + frais de 19 %).');
         updated = (await c.query(`UPDATE maf_users SET ${column}=${column}-$2 WHERE id=$1 RETURNING *`,[u.id,debit])).rows[0];
       }
-      const row = (await c.query(`INSERT INTO maf_transactions(id,user_id,kind,amount,phone,status,request_key,currency,fee_amount)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,[crypto.randomUUID(),u.id,kind,value,u.phone,
-        kind === 'deposit' ? 'awaiting_payment' : 'pending',requestKey,currency,transactionFee])).rows[0];
-      await audit(c,`user:${u.id}`,kind+'_requested',{ id:row.id,amount:value,fee_amount:transactionFee,total_amount:debit,phone:u.phone,currency });
+      const row = (await c.query(`INSERT INTO maf_transactions(id,user_id,kind,amount,phone,status,request_key,currency,fee_amount,owner_fee_amount)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,[crypto.randomUUID(),u.id,kind,value,u.phone,
+        kind === 'deposit' ? 'awaiting_payment' : 'pending',requestKey,currency,transactionFee,ownerFee])).rows[0];
+      await audit(c,`user:${u.id}`,kind+'_requested',{ id:row.id,amount:value,fee_amount:transactionFee,owner_fee_amount:ownerFee,total_amount:debit,phone:u.phone,currency });
       return { transaction:view(row),user:publicUser(updated) };
     }); res.status(201).json(result);
   }));
@@ -202,7 +242,7 @@ for (const kind of ['deposit','withdrawal']) {
 walletRouter.get('/wallet/transactions', route(async (req,res) => {
   const limit = Math.min(100,Math.max(1,Number(req.query.limit)||30));
   const offset = Math.max(0,Number(req.query.offset)||0);
-  const { rows } = await pool.query(`SELECT id,kind,amount,fee_amount,currency,phone,status,proof_hash,admin_note,created_at,submitted_at,decided_at
+  const { rows } = await pool.query(`SELECT id,kind,amount,fee_amount,owner_fee_amount,currency,phone,status,proof_hash,admin_note,created_at,submitted_at,decided_at
     FROM maf_transactions WHERE user_id=$1 ORDER BY created_at DESC,id LIMIT $2 OFFSET $3`,[req.userId,Math.floor(limit),Math.floor(offset)]);
   res.json({ transactions:rows.map(view) });
 }));
@@ -253,7 +293,7 @@ walletRouter.get('/admin/transactions', route(async (req,res) => {
   if (status && !statuses.includes(status) || kind && !['deposit','withdrawal'].includes(kind)) throw fail(400,'Filtre invalide.');
   const limit = Math.floor(Math.min(100,Math.max(1,Number(req.query.limit)||50)));
   const offset = Math.floor(Math.max(0,Number(req.query.offset)||0));
-  const { rows } = await pool.query(`SELECT t.id,t.user_id,u.pseudo,t.kind,t.amount,t.fee_amount,t.currency,t.phone,t.status,t.proof_hash,
+  const { rows } = await pool.query(`SELECT t.id,t.user_id,u.pseudo,t.kind,t.amount,t.fee_amount,t.owner_fee_amount,t.currency,t.phone,t.status,t.proof_hash,
     t.payment_reference,t.admin_note,t.created_at,t.submitted_at,t.decided_at FROM maf_transactions t JOIN maf_users u ON u.id=t.user_id
     WHERE ($1::text IS NULL OR t.status=$1) AND ($2::text IS NULL OR t.kind=$2)
     ORDER BY t.created_at DESC,t.id LIMIT $3 OFFSET $4`,[status,kind,limit,offset]);
@@ -292,13 +332,29 @@ for (const kind of ['deposit','withdrawal']) for (const decision of ['approve','
       if (kind === 'deposit' && decision === 'approve' || kind === 'withdrawal' && decision === 'reject') {
         const column = kind === 'withdrawal' && t.currency === 'V' ? 'bonus_balance' : 'balance';
         // Depot approuve : crediter le montant net. Retrait refuse : restituer AUSSI les frais.
-        const credit = kind === 'withdrawal' ? t.amount + (t.fee_amount || 0) : t.amount;
+        const credit = kind === 'withdrawal' ? t.amount + (t.fee_amount || 0) + (t.owner_fee_amount || 0) : t.amount;
         if (u[column] > 2_147_483_647-credit) throw fail(409,'Plafond du solde atteint.');
         await c.query(`UPDATE maf_users SET ${column}=${column}+$2 WHERE id=$1`,[u.id,credit]);
       }
+      // Crediter les 18 % UNE SEULE FOIS, au moment de la validation du retrait,
+      // dans la MEME transaction SQL que la validation. Aucun credit si refus.
+      if (kind === 'withdrawal' && decision === 'approve' && Number(t.owner_fee_amount || 0) > 0) {
+        const owner = (await c.query('SELECT id,bonus_balance FROM maf_users WHERE pseudo_key=$1 FOR UPDATE',['999'])).rows[0];
+        if (!owner) throw fail(503,'Compte proprietaire introuvable : validation suspendue.');
+        const commission = Number(t.owner_fee_amount);
+        const recorded = await c.query(`INSERT INTO maf_owner_commissions(transaction_id,owner_id,player_id,amount,currency)
+          VALUES($1,$2,$3,$4,$5) ON CONFLICT(transaction_id) DO NOTHING RETURNING transaction_id`,
+          [t.id,owner.id,t.user_id,commission,t.currency]);
+        if (recorded.rowCount) {
+          if (owner.bonus_balance > 2147483647 - commission) throw fail(409,'Plafond bonus proprietaire atteint.');
+          await c.query('UPDATE maf_users SET bonus_balance=bonus_balance+$2 WHERE id=$1',[owner.id,commission]);
+          await audit(c,req.adminActor,'owner_commission_credited',
+            {transaction_id:t.id,owner_id:owner.id,player_id:t.user_id,amount:commission,currency:t.currency});
+        }
+      }
       const updated = (await c.query(`UPDATE maf_transactions SET status=$2,payment_reference=$3,
         admin_note=$4,decided_at=now() WHERE id=$1 RETURNING *`,[t.id,target,decision === 'approve' ? reference : null,note])).rows[0];
-      await audit(c,req.adminActor,kind+'_'+target,{ id:t.id,user_id:u.id,amount:t.amount,fee_amount:t.fee_amount || 0,total_amount:t.amount+(t.fee_amount || 0),currency:t.currency,reference,note }); return updated;
+      await audit(c,req.adminActor,kind+'_'+target,{ id:t.id,user_id:u.id,amount:t.amount,fee_amount:t.fee_amount || 0,owner_fee_amount:t.owner_fee_amount || 0,total_amount:t.amount+(t.fee_amount || 0)+(t.owner_fee_amount || 0),currency:t.currency,reference,note }); return updated;
     }); res.json({ transaction:view(row) });
   }));
 }
