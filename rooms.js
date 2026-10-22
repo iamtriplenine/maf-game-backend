@@ -7,6 +7,7 @@ import { pool } from './db.js';
 import { ensureTable, readToken, requireSession } from './auth.js';
 import { ensureWallet } from './wallet.js';
 import { blankMatch, roleFor, recordChoice } from './penaltyEngine.js';
+import { blankCheckers, applyMove, offerDraw, respondDraw, forfeitCheckers, checkersView, MOVE_LIMIT_MS } from './checkersEngine.js';
 
 export const roomsRouter = Router();
 const allowedShots = new Set([3, 5, 10]);
@@ -41,8 +42,8 @@ export function ensureRooms() {
           code char(4) NOT NULL CHECK(code ~ '^[0-9]{4}$'),
           host_id integer NOT NULL REFERENCES maf_users(id),
           guest_id integer REFERENCES maf_users(id),
-          game text NOT NULL CHECK(game IN ('penalty')),
-          shots smallint NOT NULL CHECK(shots IN (3, 5, 10)),
+          game text NOT NULL CHECK(game IN ('penalty', 'checkers')),
+          shots smallint CHECK(shots IN (3, 5, 10)),
           stake integer NOT NULL CHECK(stake BETWEEN 100 AND 1000000),
           status text NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'pending', 'ready', 'playing', 'finished', 'closed')),
           created_at timestamptz NOT NULL DEFAULT now(),
@@ -62,6 +63,13 @@ export function ensureRooms() {
         ALTER TABLE maf_rooms ADD COLUMN IF NOT EXISTS payout integer NOT NULL DEFAULT 0;
         ALTER TABLE maf_rooms ADD COLUMN IF NOT EXISTS settled_at timestamptz;
         ALTER TABLE maf_rooms ADD COLUMN IF NOT EXISTS funds_alert jsonb;
+        ALTER TABLE maf_rooms DROP CONSTRAINT IF EXISTS maf_rooms_game_check;
+        ALTER TABLE maf_rooms ADD CONSTRAINT maf_rooms_game_check
+          CHECK(game IN ('penalty', 'checkers'));
+        ALTER TABLE maf_rooms ALTER COLUMN shots DROP NOT NULL;
+        ALTER TABLE maf_rooms DROP CONSTRAINT IF EXISTS maf_rooms_shots_check;
+        ALTER TABLE maf_rooms ADD CONSTRAINT maf_rooms_shots_check
+          CHECK((game='penalty' AND shots IN (3,5,10)) OR (game='checkers' AND shots IS NULL));
         ALTER TABLE maf_rooms DROP CONSTRAINT IF EXISTS maf_rooms_status_check;
         ALTER TABLE maf_rooms ADD CONSTRAINT maf_rooms_status_check
           CHECK(status IN ('open', 'pending', 'ready', 'playing', 'finished', 'closed'));
@@ -169,24 +177,33 @@ async function transaction(fn) {
 // Server-owned deadlines survive reloads and restarts. All transitions share the room lock.
 async function resolveDepartures(client) {
   const { rows } = await client.query(`SELECT * FROM maf_rooms
-    WHERE (status='playing' AND departures <> '{}'::jsonb)
+    WHERE (status='playing' AND (departures <> '{}'::jsonb OR game='checkers'))
        OR (status='finished' AND escrow > 0 AND settled_at IS NULL)
     ORDER BY id FOR UPDATE`);
   for (const room of rows) {
     if (room.status === 'playing') {
       const due = Object.entries(room.departures || {})
         .filter(([key, deadline]) => ['host','guest'].includes(key) && Number.isFinite(deadline) && deadline <= Date.now())
-        .sort((a,b) => a[1]-b[1] || a[0].localeCompare(b[0]));
+        .map(([loser, deadline]) => ({ loser, deadline, reason: 'return_timeout' }));
+      if (room.game === 'checkers' && room.match_state?.lastMoveAt != null) {
+        const deadline = Number(room.match_state.lastMoveAt) + MOVE_LIMIT_MS;
+        if (Number.isFinite(deadline) && deadline <= Date.now())
+          due.push({ loser: room.match_state.toMove, deadline, reason: 'move_timeout' });
+      }
+      due.sort((a,b) => a.deadline - b.deadline || a.loser.localeCompare(b.loser));
       if (!due.length || !room.match_state) continue;
-      const loser = due[0][0];
-      const state = { ...room.match_state, finished:true, winner:loser === 'host' ? 'guest' : 'host',
-        forfeit:loser, forfeitReason:'return_timeout', pending:{shooter:null,keeper:null} };
+      const { loser, reason } = due[0];
+      const state = room.game === 'checkers'
+        ? forfeitCheckers(room.match_state, loser, reason)
+        : { ...room.match_state, finished:true, winner:loser === 'host' ? 'guest' : 'host',
+          forfeit:loser, forfeitReason:reason, pending:{shooter:null,keeper:null} };
       await client.query(`UPDATE maf_rooms SET status='finished', match_state=$2::jsonb,
         departures='{}'::jsonb, updated_at=now() WHERE id=$1`, [room.id, JSON.stringify(state)]);
       await settleRoom(client, room, state.winner);
     } else {
       // Recover a recorded result only when its money is still held and was never paid.
-      await settleRoom(client, room, room.match_state?.winner);
+      if (room.match_state?.draw) await refundRoom(client, room);
+      else await settleRoom(client, room, room.match_state?.winner);
     }
   }
 }
@@ -296,8 +313,9 @@ roomsRouter.get('/:id', respond(async (req, res) => {
 
 roomsRouter.post('/', requireSession, respond(async (req, res) => {
   const { game, shots, stake } = req.body || {};
-  if (game !== 'penalty') throw fail(400, 'Jeu indisponible.');
-  if (!allowedShots.has(shots)) throw fail(400, 'Choisis 3, 5 ou 10 tirs par joueur.');
+  if (!['penalty', 'checkers'].includes(game)) throw fail(400, 'Jeu indisponible.');
+  if (game === 'penalty' && !allowedShots.has(shots)) throw fail(400, 'Choisis 3, 5 ou 10 tirs par joueur.');
+  if (game === 'checkers' && shots != null) throw fail(400, 'Les dames ne demandent pas de tirs.');
   if (!Number.isSafeInteger(stake) || stake < 100 || stake > 1_000_000)
     throw fail(400, 'Mise : entre 100 et 1 000 000 F CFA.');
   const room = await transaction(async (client) => {
@@ -311,7 +329,7 @@ roomsRouter.post('/', requireSession, respond(async (req, res) => {
       const used = await client.query('SELECT 1 FROM maf_rooms WHERE code=$1 AND status <> $2', [code, 'closed']);
       if (used.rowCount) continue;
       const { rows } = await client.query(`INSERT INTO maf_rooms(code,host_id,game,shots,stake)
-        VALUES($1,$2,$3,$4,$5) RETURNING id`, [code, req.userId, game, shots, stake]);
+        VALUES($1,$2,$3,$4,$5) RETURNING id`, [code, req.userId, game, game === 'checkers' ? null : shots, stake]);
       return load(client, rows[0].id);
     }
     throw fail(503, 'Aucun code libre. Reessaie un peu plus tard.');
@@ -411,6 +429,15 @@ function visibleMatch(r, uid) {
   if (!viewer) throw fail(403, 'Tu ne fais pas partie de ce match.');
   const state = r.match_state;
   if (!state) return { status: r.status, match: null };
+  if (r.game === 'checkers') return {
+    status: r.status, match: {
+      ...checkersView(state, viewer), viewer,
+      opponentReturnDeadline: r.departures?.[other(viewer)] ?? null,
+      returnDeadline: r.departures?.[viewer] ?? null,
+      serverNow: Date.now(),
+      moveDeadline: state.lastMoveAt == null ? null : state.lastMoveAt + MOVE_LIMIT_MS,
+    },
+  };
   const shooter = state.turn % 2 === 0 ? 'host' : 'guest';
   const role = roleFor(state.turn, viewer);
   return {
@@ -466,7 +493,7 @@ roomsRouter.post('/:id/match/start', requireSession, respond(async (req, res) =>
     if (r.host_id !== req.userId) throw fail(403, 'Seul le createur lance le match.');
     if (r.status !== 'ready') throw fail(409, 'Le match ne peut pas etre lance.');
     await client.query(`UPDATE maf_rooms SET status='playing', match_state=$2::jsonb,updated_at=now()
-      WHERE id=$1`, [r.id, JSON.stringify(blankMatch(r.shots))]);
+      WHERE id=$1`, [r.id, JSON.stringify(r.game === 'checkers' ? { ...blankCheckers(), lastMoveAt: Date.now() } : blankMatch(r.shots))]);
     return load(client, r.id);
   });
   res.json({ room: shown(room, req.userId), ...visibleMatch(room, req.userId) });
@@ -480,6 +507,7 @@ roomsRouter.post('/:id/match/choose', requireSession, respond(async (req, res) =
     const viewer = side(r, req.userId);
     if (!viewer) throw fail(403, 'Tu ne participes pas a ce match.');
     if (r.status !== 'playing' || !r.match_state) throw fail(409, "Le match n'est plus en cours.");
+    if (r.game !== 'penalty') throw fail(400, "Ce match n'est pas un tir au but.");
     const state = r.match_state;
     if (r.departures?.[viewer]) throw fail(409, 'Reviens dans le match avant de jouer.');
     const role = roleFor(state.turn, viewer);
@@ -501,10 +529,13 @@ roomsRouter.post('/:id/match/forfeit', requireSession, respond(async (req, res) 
     if (!viewer) throw fail(403, 'Tu ne participes pas a ce match.');
     if (r.status !== 'playing' || !r.match_state) throw fail(409, 'Aucun match a abandonner.');
     const state = r.match_state;
-    state.winner = other(viewer);
-    state.finished = true;
-    state.forfeit = viewer;
-    state.pending = { shooter: null, keeper: null };
+    if (r.game === 'checkers') forfeitCheckers(state, viewer);
+    else {
+      state.winner = other(viewer);
+      state.finished = true;
+      state.forfeit = viewer;
+      state.pending = { shooter: null, keeper: null };
+    }
     await client.query(`UPDATE maf_rooms SET status='finished', match_state=$2::jsonb,
       updated_at=now() WHERE id=$1`, [r.id, JSON.stringify(state)]);
     await settleRoom(client, r, state.winner);
@@ -513,12 +544,64 @@ roomsRouter.post('/:id/match/forfeit', requireSession, respond(async (req, res) 
   res.json({ room: shown(result, req.userId), ...visibleMatch(result, req.userId) });
 }));
 
+
+// ------------ DAMES : coups entierement verifies par le serveur ------------
+roomsRouter.post('/:id/match/move', requireSession, respond(async (req, res) => {
+  const result = await transaction(async (client) => {
+    const r = await load(client, roomId(req.params.id));
+    const viewer = side(r, req.userId);
+    if (!viewer) throw fail(403, 'Tu ne participes pas a ce match.');
+    if (r.game !== 'checkers' || r.status !== 'playing' || !r.match_state)
+      throw fail(409, 'Aucune partie de dames en cours.');
+    if (r.departures?.[viewer]) throw fail(409, 'Reviens dans le match avant de jouer.');
+    const state = r.match_state;
+    try { applyMove(state, viewer, req.body, Date.now()); }
+    catch (err) { throw fail(400, err.message); }
+    const status = state.finished ? 'finished' : 'playing';
+    await client.query(`UPDATE maf_rooms SET status=$2,match_state=$3::jsonb,updated_at=now() WHERE id=$1`,
+      [r.id, status, JSON.stringify(state)]);
+    if (state.finished) {
+      if (state.draw) await refundRoom(client, r);
+      else await settleRoom(client, r, state.winner);
+    }
+    return load(client, r.id);
+  });
+  res.json({ room: shown(result, req.userId), ...visibleMatch(result, req.userId) });
+}));
+
+for (const action of ['offer', 'respond']) {
+  roomsRouter.post(`/:id/match/draw/${action}`, requireSession, respond(async (req, res) => {
+    const result = await transaction(async (client) => {
+      const r = await load(client, roomId(req.params.id));
+      const viewer = side(r, req.userId);
+      if (!viewer) throw fail(403, 'Tu ne participes pas a ce match.');
+      if (r.game !== 'checkers' || r.status !== 'playing' || !r.match_state)
+        throw fail(409, 'Aucune partie de dames en cours.');
+      if (r.departures?.[viewer]) throw fail(409, 'Reviens dans le match avant de jouer.');
+      const state = r.match_state;
+      try {
+        if (action === 'offer') offerDraw(state, viewer);
+        else {
+          if (typeof req.body?.accept !== 'boolean') throw new Error('Reponse invalide.');
+          respondDraw(state, viewer, req.body.accept);
+        }
+      } catch (err) { throw fail(400, err.message); }
+      await client.query(`UPDATE maf_rooms SET status=$2,match_state=$3::jsonb,updated_at=now() WHERE id=$1`,
+        [r.id, state.finished ? 'finished' : 'playing', JSON.stringify(state)]);
+      if (state.draw) await refundRoom(client, r);
+      return load(client, r.id);
+    });
+    res.json({ room: shown(result, req.userId), ...visibleMatch(result, req.userId) });
+  }));
+}
+
 // Resultats recents, uniquement pour leurs deux joueurs, pendant 7 jours.
 roomsRouter.get('/results/recent', requireSession, respond(async (req, res) => {
   const { rows } = await pool.query(`${SELECT} WHERE r.status='finished'
     AND (r.host_id=$1 OR r.guest_id=$1) AND r.updated_at > now() - interval '7 days'
     ORDER BY r.updated_at DESC LIMIT 10`, [req.userId]);
   res.json({ rooms: rows.map((r) => ({ ...shown(r, req.userId),
-    result: { winner: r.match_state?.winner, scores: r.match_state?.scores, forfeit: r.match_state?.forfeit || null },
+    result: { winner: r.match_state?.winner, draw: r.match_state?.draw || false,
+      scores: r.match_state?.scores, forfeit: r.match_state?.forfeit || null },
   })) });
 }));
