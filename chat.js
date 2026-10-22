@@ -5,9 +5,12 @@ import { pool } from "./db.js";
 import { ensureTable, requireSession } from "./auth.js";
 
 const MAX_LENGTH = 200; // caracteres par message
-const FIRST_LOAD = 30; // messages renvoyes au premier chargement
+// Nombre maximum de messages gardes dans la base : au-dela, les plus anciens sont
+// supprimes automatiquement. Un message pese environ 0,3 Ko, donc 200 messages ~ 60 Ko.
+// Modifiable sur Render sans toucher au code : variable CHAT_MAX_MESSAGES.
+const MAX_MESSAGES = Math.max(20, Number.parseInt(process.env.CHAT_MAX_MESSAGES || "", 10) || 200);
+const FIRST_LOAD = MAX_MESSAGES; // premier chargement : tout l'historique garde
 const NEXT_LOAD = 50; // messages renvoyes au maximum ensuite
-const KEEP = 1000; // messages gardes en base (les plus anciens sont supprimes)
 const MIN_DELAY = 1500; // 1 message toutes les 1,5 s par compte
 const PER_MINUTE = 15; // et 15 messages par minute au maximum
 
@@ -27,6 +30,7 @@ function ensureChatTable() {
            )`
         )
       )
+      .then(() => prune())
       .catch((error) => {
         tableReady = null;
         throw error;
@@ -59,7 +63,13 @@ function tooFast(userId) {
   return false;
 }
 
-let sincePrune = 0;
+// Garde seulement les MAX_MESSAGES plus recents (supprime le haut de l'historique).
+async function prune() {
+  await pool.query(
+    "delete from maf_chat where id <= (select id from maf_chat order by id desc offset $1 limit 1)",
+    [MAX_MESSAGES]
+  );
+}
 
 export const chatRouter = Router();
 
@@ -117,13 +127,8 @@ chatRouter.post("/chat", requireSession, async (req, res) => {
     );
     res.json({ message: toMessage(result.rows[0]) });
 
-    sincePrune += 1;
-    if (sincePrune >= 50) {
-      sincePrune = 0;
-      pool
-        .query("delete from maf_chat where id < (select coalesce(max(id), 0) - $1 from maf_chat)", [KEEP])
-        .catch((error) => console.error("chat nettoyage :", error.message));
-    }
+    // nettoyage immediat : la base ne depasse jamais MAX_MESSAGES
+    prune().catch((error) => console.error("chat nettoyage :", error.message));
   } catch (error) {
     console.error("chat post :", error.message);
     fail(res, 500, "Erreur serveur, reessaie.");
