@@ -5,6 +5,7 @@ import { pool } from "./db.js";
 import { authRouter } from "./auth.js";
 import { chatRouter } from "./chat.js";
 import { roomsRouter } from "./rooms.js";
+import { historyRouter } from "./history.js";
 
 const app = express();
 app.use(express.json({ limit: "3mb" }));
@@ -41,6 +42,7 @@ app.use("/api", chatRouter); // /api/chat
 app.use("/api/rooms", roomsRouter); // Salons et tir au but (etape 2)
 
 app.use("/api", walletRouter);
+app.use("/api/history", historyRouter);
 app.use((error, _req, res, _next) => {
   if (error.type === "entity.too.large") return res.status(413).json({ error: "Capture trop volumineuse (2 Mo maximum)." });
   if (error.type === "entity.parse.failed") return res.status(400).json({ error: "JSON invalide." });
