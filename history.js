@@ -35,13 +35,14 @@ historyRouter.use((_req,_res,next) => { ensureRooms().then(() => next(),next); }
 const transactions = `
   SELECT 'wallet:' || t.id::text AS id,t.kind,t.amount,t.currency,t.status,
     CASE WHEN t.kind='deposit' AND t.status='approved' THEN t.amount
-      WHEN t.kind='withdrawal' AND t.status IN ('pending','approved') THEN -t.amount ELSE 0 END AS delta,
+      WHEN t.kind='withdrawal' AND t.status IN ('pending','approved') THEN -(t.amount+coalesce(t.fee_amount,0)) ELSE 0 END AS delta,
     t.phone,t.admin_note AS note,t.payment_reference AS reference,
-    t.created_at,t.decided_at,NULL::text AS room_code
+    t.created_at,t.decided_at,NULL::text AS room_code,
+    coalesce(t.fee_amount,0)::integer AS fee_amount,(t.amount+coalesce(t.fee_amount,0))::integer AS total_amount
   FROM maf_transactions t WHERE t.user_id=$1
   UNION ALL
   SELECT 'coupon:' || cu.code,'coupon',c.amount,c.currency,'approved',c.amount,
-    NULL,NULL,cu.code,cu.created_at,NULL,NULL
+    NULL,NULL,cu.code,cu.created_at,NULL,NULL,0,c.amount
   FROM maf_coupon_uses cu JOIN maf_coupons c ON c.code=cu.code WHERE cu.user_id=$1
   UNION ALL
   SELECT 'game:' || a.id::text,
@@ -50,7 +51,8 @@ const transactions = `
     'F','approved',
     CASE WHEN a.event='room_stakes_held' THEN -(a.details->>'amount_each')::integer
       WHEN a.event='room_payout' THEN (a.details->>'amount')::integer ELSE (a.details->>'amount_each')::integer END,
-    NULL,NULL,r.id::text,a.created_at,NULL,trim(r.code)
+    NULL,NULL,r.id::text,a.created_at,NULL,trim(r.code),0,
+    CASE WHEN a.event='room_payout' THEN (a.details->>'amount')::integer ELSE (a.details->>'amount_each')::integer END
   FROM maf_wallet_audit a JOIN maf_rooms r ON r.id::text=a.details->>'room_id'
   WHERE (a.event IN ('room_stakes_held','room_refund') AND a.details->'users' @> jsonb_build_array($1::integer))
     OR (a.event='room_payout' AND a.details->>'winner_id'=$1::text)

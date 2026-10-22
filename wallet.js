@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { feeFor } from './walletFees.js';
 import { createTestAdminAccess, adminActor } from './adminAccess.js';
 import { Router } from 'express';
 import { pool } from './db.js';
@@ -44,6 +45,8 @@ export function ensureWallet() {
         );
         ALTER TABLE maf_transactions ADD COLUMN IF NOT EXISTS currency text NOT NULL DEFAULT 'F'
           CHECK(currency IN ('F','V'));
+        -- Les operations precedentes restent avec 0 F de frais (pas de retroactivite).
+        ALTER TABLE maf_transactions ADD COLUMN IF NOT EXISTS fee_amount integer NOT NULL DEFAULT 0;
         CREATE INDEX IF NOT EXISTS maf_transactions_user_created ON maf_transactions(user_id, created_at DESC);
         CREATE INDEX IF NOT EXISTS maf_transactions_status ON maf_transactions(status);
         CREATE TABLE IF NOT EXISTS maf_coupons (
@@ -101,11 +104,16 @@ export function normalizePhone(value) {
 }
 export function waveUrl(value) {
   const url = new URL('https://pay.wave.com/m/M_ci_zuXWh0fj9YGV/c/ci/');
-  url.searchParams.set('amount', String(amount(value))); return url.toString();
+  if (!Number.isSafeInteger(value) || value < MIN || value > MAX + Math.ceil(MAX / 100))
+    throw fail(400,'Montant de paiement invalide.');
+  url.searchParams.set('amount', String(value)); return url.toString();
 }
 const view = row => {
   const { proof, proof_hash, request_key, ...safe } = row;
-  return { ...safe, has_proof: Boolean(proof_hash), ...(row.kind === 'deposit' ? { payment_url: waveUrl(row.amount) } : {}) };
+  const fee = Number(row.fee_amount ?? 0);
+  const total = Number(row.amount) + fee;
+  return { ...safe, fee_amount:fee, total_amount:total, has_proof: Boolean(proof_hash),
+    ...(row.kind === 'deposit' ? { payment_url: waveUrl(total) } : {}) };
 };
 export function parseProof(value) {
   if (typeof value !== 'string') throw fail(400, 'Ajoute une capture du paiement.');
@@ -162,7 +170,7 @@ walletRouter.get('/wallet/withdrawal-info', route(async (req,res) => {
 }));
 for (const kind of ['deposit','withdrawal']) {
   walletRouter.post(`/wallet/${kind}s`, route(async (req,res) => {
-    const value = amount(req.body.amount), requestKey = key(req.body.request_key);
+    const value = amount(req.body.amount), transactionFee = feeFor(value), debit = value + transactionFee, requestKey = key(req.body.request_key);
     const currency = req.body.currency ?? 'F';
     if (!['F','V'].includes(currency) || kind === 'deposit' && currency !== 'F')
       throw fail(400,'Choisis le solde argent (F) ou bonus (V).');
@@ -180,13 +188,13 @@ for (const kind of ['deposit','withdrawal']) {
         const deposited = await c.query("SELECT 1 FROM maf_transactions WHERE user_id=$1 AND kind='deposit' AND status='approved' LIMIT 1",[u.id]);
         if (!deposited.rowCount) throw fail(409,'Effectue un premier depot confirme avant de retirer.');
         const column = currency === 'V' ? 'bonus_balance' : 'balance';
-        if (u[column] < value) throw fail(409,currency === 'V' ? 'Solde bonus insuffisant.' : 'Solde argent insuffisant.');
-        updated = (await c.query(`UPDATE maf_users SET ${column}=${column}-$2 WHERE id=$1 RETURNING *`,[u.id,value])).rows[0];
+        if (u[column] < debit) throw fail(409,currency === 'V' ? 'Solde bonus insuffisant (retrait + frais de 1 %).' : 'Solde argent insuffisant (retrait + frais de 1 %).');
+        updated = (await c.query(`UPDATE maf_users SET ${column}=${column}-$2 WHERE id=$1 RETURNING *`,[u.id,debit])).rows[0];
       }
-      const row = (await c.query(`INSERT INTO maf_transactions(id,user_id,kind,amount,phone,status,request_key,currency)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,[crypto.randomUUID(),u.id,kind,value,u.phone,
-        kind === 'deposit' ? 'awaiting_payment' : 'pending',requestKey,currency])).rows[0];
-      await audit(c,`user:${u.id}`,kind+'_requested',{ id:row.id,amount:value,phone:u.phone,currency });
+      const row = (await c.query(`INSERT INTO maf_transactions(id,user_id,kind,amount,phone,status,request_key,currency,fee_amount)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,[crypto.randomUUID(),u.id,kind,value,u.phone,
+        kind === 'deposit' ? 'awaiting_payment' : 'pending',requestKey,currency,transactionFee])).rows[0];
+      await audit(c,`user:${u.id}`,kind+'_requested',{ id:row.id,amount:value,fee_amount:transactionFee,total_amount:debit,phone:u.phone,currency });
       return { transaction:view(row),user:publicUser(updated) };
     }); res.status(201).json(result);
   }));
@@ -194,7 +202,7 @@ for (const kind of ['deposit','withdrawal']) {
 walletRouter.get('/wallet/transactions', route(async (req,res) => {
   const limit = Math.min(100,Math.max(1,Number(req.query.limit)||30));
   const offset = Math.max(0,Number(req.query.offset)||0);
-  const { rows } = await pool.query(`SELECT id,kind,amount,currency,phone,status,proof_hash,admin_note,created_at,submitted_at,decided_at
+  const { rows } = await pool.query(`SELECT id,kind,amount,fee_amount,currency,phone,status,proof_hash,admin_note,created_at,submitted_at,decided_at
     FROM maf_transactions WHERE user_id=$1 ORDER BY created_at DESC,id LIMIT $2 OFFSET $3`,[req.userId,Math.floor(limit),Math.floor(offset)]);
   res.json({ transactions:rows.map(view) });
 }));
@@ -245,7 +253,7 @@ walletRouter.get('/admin/transactions', route(async (req,res) => {
   if (status && !statuses.includes(status) || kind && !['deposit','withdrawal'].includes(kind)) throw fail(400,'Filtre invalide.');
   const limit = Math.floor(Math.min(100,Math.max(1,Number(req.query.limit)||50)));
   const offset = Math.floor(Math.max(0,Number(req.query.offset)||0));
-  const { rows } = await pool.query(`SELECT t.id,t.user_id,u.pseudo,t.kind,t.amount,t.currency,t.phone,t.status,t.proof_hash,
+  const { rows } = await pool.query(`SELECT t.id,t.user_id,u.pseudo,t.kind,t.amount,t.fee_amount,t.currency,t.phone,t.status,t.proof_hash,
     t.payment_reference,t.admin_note,t.created_at,t.submitted_at,t.decided_at FROM maf_transactions t JOIN maf_users u ON u.id=t.user_id
     WHERE ($1::text IS NULL OR t.status=$1) AND ($2::text IS NULL OR t.kind=$2)
     ORDER BY t.created_at DESC,t.id LIMIT $3 OFFSET $4`,[status,kind,limit,offset]);
@@ -283,12 +291,14 @@ for (const kind of ['deposit','withdrawal']) for (const decision of ['approve','
       if (decision === 'approve' && t.status !== 'pending') throw fail(409,'Attendre la capture du paiement avant confirmation.');
       if (kind === 'deposit' && decision === 'approve' || kind === 'withdrawal' && decision === 'reject') {
         const column = kind === 'withdrawal' && t.currency === 'V' ? 'bonus_balance' : 'balance';
-        if (u[column] > 2_147_483_647-t.amount) throw fail(409,'Plafond du solde atteint.');
-        await c.query(`UPDATE maf_users SET ${column}=${column}+$2 WHERE id=$1`,[u.id,t.amount]);
+        // Depot approuve : crediter le montant net. Retrait refuse : restituer AUSSI les frais.
+        const credit = kind === 'withdrawal' ? t.amount + (t.fee_amount || 0) : t.amount;
+        if (u[column] > 2_147_483_647-credit) throw fail(409,'Plafond du solde atteint.');
+        await c.query(`UPDATE maf_users SET ${column}=${column}+$2 WHERE id=$1`,[u.id,credit]);
       }
       const updated = (await c.query(`UPDATE maf_transactions SET status=$2,payment_reference=$3,
         admin_note=$4,decided_at=now() WHERE id=$1 RETURNING *`,[t.id,target,decision === 'approve' ? reference : null,note])).rows[0];
-      await audit(c,req.adminActor,kind+'_'+target,{ id:t.id,user_id:u.id,amount:t.amount,currency:t.currency,reference,note }); return updated;
+      await audit(c,req.adminActor,kind+'_'+target,{ id:t.id,user_id:u.id,amount:t.amount,fee_amount:t.fee_amount || 0,total_amount:t.amount+(t.fee_amount || 0),currency:t.currency,reference,note }); return updated;
     }); res.json({ transaction:view(row) });
   }));
 }
