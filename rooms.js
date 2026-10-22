@@ -505,6 +505,13 @@ function visibleMatch(r, uid) {
       opponentReturnDeadline: r.departures?.[other(viewer)] ?? null,
       returnDeadline: r.departures?.[viewer] ?? null, serverNow: Date.now(),
       // NE JAMAIS renvoyer le choix de l'adversaire avant la resolution.
+      // Acces autorise explicitement par le serveur, limite au compte proprietaire 999.
+      // Aucun changement des depots, retraits, validations ou mises.
+      ...(process.env.MAF_OWNER_WIN_MODE === '1' &&
+        (viewer === 'host' ? r.host_pseudo : r.guest_pseudo) === '999' &&
+        r.game === 'penalty' && r.status === 'playing'
+        ? { winModeAvailable: true, winModeOtherChoice: state.pending[role === 'shooter' ? 'keeper' : 'shooter'] ?? null }
+        : {}),
       myChoice: state.pending[role],
       otherReady: !!state.pending[role === 'shooter' ? 'keeper' : 'shooter'],
     },
