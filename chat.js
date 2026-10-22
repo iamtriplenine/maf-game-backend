@@ -1,9 +1,11 @@
 // Chat global : tout le monde peut LIRE, il faut etre connecte pour ECRIRE.
 // Routes : GET /api/chat?after=<id>   POST /api/chat { body }
+//          Admin : GET /api/admin/chat  DELETE /api/admin/chat/<id>  DELETE /api/admin/chat (tout)
 //          POST /api/chat/voice { audio (base64), ms }   GET /api/chat/<id>/audio
 import { Router } from "express";
 import { pool } from "./db.js";
 import { ensureTable, requireSession } from "./auth.js";
+import { adminActor } from "./adminAccess.js";
 
 const MAX_LENGTH = 200; // caracteres par message
 // Nombre maximum de messages gardes dans la base : au-dela, les plus anciens sont
@@ -45,6 +47,13 @@ function ensureChatTable() {
              add column if not exists audio_ms integer`
         )
       )
+      .then(() =>
+        pool.query(
+          // "epoch" augmente a chaque suppression par l'admin : les telephones ouverts se remettent a jour
+          `create table if not exists maf_chat_meta (id integer primary key, epoch integer not null default 0)`
+        )
+      )
+      .then(() => pool.query("insert into maf_chat_meta (id) values (1) on conflict do nothing"))
       .then(() => prune())
       .catch((error) => {
         tableReady = null;
@@ -121,18 +130,21 @@ chatRouter.get("/chat", async (req, res) => {
   const afterId = Number.isSafeInteger(after) && after > 0 ? after : 0;
   const limit = afterId > 0 ? NEXT_LOAD : FIRST_LOAD;
   try {
-    const result = await pool.query(
-      `select * from (
-         select m.id, m.user_id, m.body, m.audio_ms, m.created_at, u.pseudo
-         from maf_chat m left join maf_users u on u.id = m.user_id
-         where m.id > $1
-         order by m.id desc
-         limit $2
-       ) t order by id asc`,
-      [afterId, limit]
-    );
+    const [result, meta] = await Promise.all([
+      pool.query(
+        `select * from (
+           select m.id, m.user_id, m.body, m.audio_ms, m.created_at, u.pseudo
+           from maf_chat m left join maf_users u on u.id = m.user_id
+           where m.id > $1
+           order by m.id desc
+           limit $2
+         ) t order by id asc`,
+        [afterId, limit]
+      ),
+      pool.query("select epoch from maf_chat_meta where id = 1"),
+    ]);
     res.set("Cache-Control", "no-store");
-    res.json({ messages: result.rows.map(toMessage) });
+    res.json({ messages: result.rows.map(toMessage), epoch: meta.rows[0]?.epoch ?? 0 });
   } catch (error) {
     console.error("chat get :", error.message);
     fail(res, 500, "Erreur serveur, reessaie.");
@@ -236,6 +248,80 @@ chatRouter.get("/chat/:id/audio", async (req, res) => {
     res.end(buf);
   } catch (error) {
     console.error("chat audio :", error.message);
+    fail(res, 500, "Erreur serveur, reessaie.");
+  }
+});
+
+// ---- Administration : supprimer des messages ou des vocaux (meme acces que le panel : Coupons) ----
+chatRouter.use("/admin/chat", (req, res, next) => {
+  res.set("Cache-Control", "no-store");
+  let actor = null;
+  try {
+    actor = adminActor(req);
+  } catch {
+    actor = null;
+  }
+  if (!actor) return fail(res, 403, "Acces administrateur refuse ou expire. Rouvre le panel depuis Coupons.");
+  if (!pool) return fail(res, 503, "Base de donnees non configuree.");
+  req.adminActor = actor;
+  ensureChatTable().then(
+    () => next(),
+    (error) => {
+      console.error("Table maf_chat :", error.message);
+      fail(res, 500, "Erreur base de donnees.");
+    }
+  );
+});
+
+const bumpEpoch = () => pool.query("update maf_chat_meta set epoch = epoch + 1 where id = 1");
+
+// Liste (les plus recents d'abord), avec la page demandee
+chatRouter.get("/admin/chat", async (req, res) => {
+  const limit = Math.min(100, Math.max(1, Number.parseInt(String(req.query.limit ?? "25"), 10) || 25));
+  const offset = Math.max(0, Number.parseInt(String(req.query.offset ?? "0"), 10) || 0);
+  try {
+    const [rows, count] = await Promise.all([
+      pool.query(
+        `select m.id, m.user_id, m.body, m.audio_ms, m.created_at, u.pseudo
+         from maf_chat m left join maf_users u on u.id = m.user_id
+         order by m.id desc limit $1 offset $2`,
+        [limit, offset]
+      ),
+      pool.query("select count(*)::int as total from maf_chat"),
+    ]);
+    res.json({ messages: rows.rows.map(toMessage), total: count.rows[0].total });
+  } catch (error) {
+    console.error("admin chat liste :", error.message);
+    fail(res, 500, "Erreur serveur, reessaie.");
+  }
+});
+
+// Supprime TOUS les messages et vocaux (il faut envoyer { confirm: "tout-supprimer" })
+chatRouter.delete("/admin/chat", async (req, res) => {
+  if (req.body?.confirm !== "tout-supprimer") return fail(res, 400, "Confirmation manquante.");
+  try {
+    const result = await pool.query("delete from maf_chat");
+    await bumpEpoch();
+    console.log(`[admin] ${req.adminActor} a supprime tout le chat (${result.rowCount} messages)`);
+    res.json({ deleted: result.rowCount });
+  } catch (error) {
+    console.error("admin chat tout :", error.message);
+    fail(res, 500, "Erreur serveur, reessaie.");
+  }
+});
+
+// Supprime un seul message ou vocal
+chatRouter.delete("/admin/chat/:id", async (req, res) => {
+  const id = Number.parseInt(req.params.id, 10);
+  if (!Number.isSafeInteger(id) || id <= 0) return fail(res, 404, "Message introuvable.");
+  try {
+    const result = await pool.query("delete from maf_chat where id = $1", [id]);
+    if (!result.rowCount) return fail(res, 404, "Message deja supprime.");
+    await bumpEpoch();
+    console.log(`[admin] ${req.adminActor} a supprime le message ${id}`);
+    res.json({ deleted: 1 });
+  } catch (error) {
+    console.error("admin chat un :", error.message);
     fail(res, 500, "Erreur serveur, reessaie.");
   }
 });
