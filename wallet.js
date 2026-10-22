@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { createTestAdminAccess, adminActor } from './adminAccess.js';
 import { Router } from 'express';
 import { pool } from './db.js';
 import { ensureTable, requireSession, publicUser } from './auth.js';
@@ -124,12 +125,9 @@ walletRouter.use(walletPaths, (req, res, next) => {
 });
 walletRouter.use('/wallet', requireSession);
 walletRouter.use('/admin', (req, res, next) => {
-  const expected = process.env.ADMIN_API_KEY || '';
-  const given = String(req.headers['x-admin-key'] || '');
-  if (expected.length < 32) return res.status(503).json({ error: 'Administration non configuree.' });
-  const a = crypto.createHash('sha256').update(expected).digest();
-  const b = crypto.createHash('sha256').update(given).digest();
-  if (!crypto.timingSafeEqual(a,b)) return res.status(403).json({ error: 'Acces administrateur refuse.' });
+  res.set('Cache-Control','no-store');
+  req.adminActor = adminActor(req);
+  if (!req.adminActor) return res.status(403).json({ error: 'Acces administrateur refuse ou expire. Rouvre le panel depuis Coupons.' });
   next();
 });
 walletRouter.get('/wallet', route(async (req,res) => {
@@ -196,6 +194,14 @@ walletRouter.post('/wallet/deposits/:id/proof', route(async (req,res) => {
   }); res.json({ transaction:view(row) });
 }));
 walletRouter.post('/wallet/coupons/redeem', route(async (req,res) => {
+  const access = createTestAdminAccess(req,req.body.code);
+  if (access) {
+    const exists = await pool.query('SELECT id FROM maf_users WHERE id=$1',[req.userId]);
+    if (!exists.rows[0]) throw fail(401,'Compte introuvable.');
+    await audit(pool,'user:'+req.userId,'admin_test_opened',{ expires_at:access.expires_at });
+    res.set('Cache-Control','no-store');
+    return res.json({ admin_access:access });
+  }
   const code = couponCode(req.body.code);
   const result = await tx(async c => {
     const u = await user(c,req.userId);
@@ -224,7 +230,9 @@ walletRouter.get('/admin/transactions', route(async (req,res) => {
     t.payment_reference,t.admin_note,t.created_at,t.submitted_at,t.decided_at FROM maf_transactions t JOIN maf_users u ON u.id=t.user_id
     WHERE ($1::text IS NULL OR t.status=$1) AND ($2::text IS NULL OR t.kind=$2)
     ORDER BY t.created_at DESC,t.id LIMIT $3 OFFSET $4`,[status,kind,limit,offset]);
-  res.json({ transactions:rows.map(view) });
+  const total = (await pool.query(`SELECT count(*)::integer AS total FROM maf_transactions
+    WHERE ($1::text IS NULL OR status=$1) AND ($2::text IS NULL OR kind=$2)`,[status,kind])).rows[0].total;
+  res.json({ transactions:rows.map(view),total,limit,offset });
 }));
 walletRouter.get('/admin/transactions/:id/proof', route(async (req,res) => {
   key(req.params.id);
@@ -260,7 +268,7 @@ for (const kind of ['deposit','withdrawal']) for (const decision of ['approve','
       }
       const updated = (await c.query(`UPDATE maf_transactions SET status=$2,payment_reference=$3,
         admin_note=$4,decided_at=now() WHERE id=$1 RETURNING *`,[t.id,target,decision === 'approve' ? reference : null,note])).rows[0];
-      await audit(c,'admin:api-key',kind+'_'+target,{ id:t.id,user_id:u.id,amount:t.amount,reference,note }); return updated;
+      await audit(c,req.adminActor,kind+'_'+target,{ id:t.id,user_id:u.id,amount:t.amount,reference,note }); return updated;
     }); res.json({ transaction:view(row) });
   }));
 }
@@ -281,7 +289,7 @@ walletRouter.post('/admin/users/:id/verify-phone', route(async (req,res) => {
     if (!u.phone) throw fail(409,'Aucun numero enregistre.');
     if (u.phone_verified_at) return publicUser(u);
     const updated = (await c.query('UPDATE maf_users SET phone_verified_at=now() WHERE id=$1 RETURNING *',[id])).rows[0];
-    await audit(c,'admin:api-key','phone_verified',{ user_id:id,phone:u.phone,note }); return publicUser(updated);
+    await audit(c,req.adminActor,'phone_verified',{ user_id:id,phone:u.phone,note }); return publicUser(updated);
   }); res.json({ user:result });
 }));
 walletRouter.post('/admin/coupons', route(async (req,res) => {
@@ -291,7 +299,7 @@ walletRouter.post('/admin/coupons', route(async (req,res) => {
   if (expires_at !== null && (typeof expires_at !== 'string' || !Number.isFinite(Date.parse(expires_at)) || Date.parse(expires_at) <= Date.now())) throw fail(400,'Date expiration future requise.');
   const coupon = await tx(async c => {
     const row = (await c.query(`INSERT INTO maf_coupons(code,amount,currency,max_uses,expires_at) VALUES($1,$2,$3,$4,$5) RETURNING *`,[code,value,currency,max_uses,expires_at])).rows[0];
-    await audit(c,'admin:api-key','coupon_created',row); return row;
+    await audit(c,req.adminActor,'coupon_created',row); return row;
   }); res.status(201).json({ coupon });
 }));
 walletRouter.get('/admin/coupons', route(async (req,res) => {
@@ -305,6 +313,26 @@ walletRouter.patch('/admin/coupons/:code', route(async (req,res) => {
   const coupon = await tx(async c => {
     const row = (await c.query('UPDATE maf_coupons SET active=$2 WHERE code=$1 RETURNING *',[code,req.body.active])).rows[0];
     if (!row) throw fail(404,'Coupon introuvable.');
-    await audit(c,'admin:api-key','coupon_status_changed',{ code,active:row.active }); return row;
+    await audit(c,req.adminActor,'coupon_status_changed',{ code,active:row.active }); return row;
   }); res.json({ coupon });
+}));
+
+// Donnees publiques du compte uniquement : jamais de code de connexion ni de hash.
+walletRouter.get('/admin/users', route(async (req,res) => {
+  const q = typeof req.query.q === 'string' ? req.query.q.trim().slice(0,80) : '';
+  const limit = Math.floor(Math.min(100,Math.max(1,Number(req.query.limit)||25)));
+  const offset = Math.floor(Math.max(0,Number(req.query.offset)||0));
+  if (!Number.isFinite(offset)) throw fail(400,'Pagination invalide.');
+  const where = "($1::text='' OR strpos(lower(pseudo),lower($1))>0 OR strpos(coalesce(phone,''),$1)>0 OR id::text=$1)";
+  const { rows } = await pool.query(`SELECT id,pseudo,balance,bonus_balance,phone,created_at,
+    phone_registered_at,phone_verified_at,phone_verification_deadline FROM maf_users
+    WHERE ${where} ORDER BY created_at DESC,id DESC LIMIT $2 OFFSET $3`,[q,limit,offset]);
+  const total = (await pool.query(`SELECT count(*)::integer AS total FROM maf_users WHERE ${where}`,[q])).rows[0].total;
+  res.json({ users:rows,total,limit,offset });
+}));
+walletRouter.get('/admin/summary', route(async (_req,res) => {
+  const users = (await pool.query('SELECT count(*)::integer AS total FROM maf_users')).rows[0].total;
+  const deposits = (await pool.query(`SELECT status,count(*)::integer AS count,
+    coalesce(sum(amount),0)::text AS amount FROM maf_transactions WHERE kind='deposit' GROUP BY status`)).rows;
+  res.json({ users,deposits });
 }));
