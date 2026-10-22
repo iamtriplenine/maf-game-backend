@@ -1,9 +1,11 @@
-// MARV GAME — Salons et tir au but (etape 2/2).
-// Les mises et gains sont SIMULES : aucune operation de portefeuille.
+// MARV GAME — Salons et tir au but.
+// Mises REELLES : debitees quand le createur accepte l'adversaire, retenues sur le salon (escrow),
+// versees au gagnant a la fin du match, ou remboursees si le salon est ferme avant la fin.
 import crypto from 'node:crypto';
 import { Router } from 'express';
 import { pool } from './db.js';
 import { ensureTable, readToken, requireSession } from './auth.js';
+import { ensureWallet } from './wallet.js';
 import { blankMatch, roleFor, recordChoice } from './penaltyEngine.js';
 
 export const roomsRouter = Router();
@@ -27,6 +29,7 @@ let ready = null;
 export function ensureRooms() {
   if (!ready) ready = (async () => {
     await ensureTable();
+    await ensureWallet(); // table d'audit des operations d'argent
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
@@ -53,6 +56,10 @@ export function ensureRooms() {
       // Mise a niveau automatique des tables creees a l'etape 1.
       await client.query(`
         ALTER TABLE maf_rooms ADD COLUMN IF NOT EXISTS match_state jsonb;
+        ALTER TABLE maf_rooms ADD COLUMN IF NOT EXISTS escrow integer NOT NULL DEFAULT 0;
+        ALTER TABLE maf_rooms ADD COLUMN IF NOT EXISTS payout integer NOT NULL DEFAULT 0;
+        ALTER TABLE maf_rooms ADD COLUMN IF NOT EXISTS settled_at timestamptz;
+        ALTER TABLE maf_rooms ADD COLUMN IF NOT EXISTS funds_alert jsonb;
         ALTER TABLE maf_rooms DROP CONSTRAINT IF EXISTS maf_rooms_status_check;
         ALTER TABLE maf_rooms ADD CONSTRAINT maf_rooms_status_check
           CHECK(status IN ('open', 'pending', 'ready', 'playing', 'finished', 'closed'));
@@ -78,10 +85,69 @@ export function ensureRooms() {
 
 // Fermer automatiquement les salons inactifs apres 24 heures.
 // S'applique egalement aux salons qui attendaient le lancement du jeu.
-async function expireRooms(client) {
-  await client.query(`UPDATE maf_rooms SET status='closed', closed_at=now(), updated_at=now()
-    WHERE status IN ('open','pending','ready','playing') AND updated_at < now() - interval '${ROOM_LIFETIME}'`);
+async function expireRooms(db) {
+  // Un salon expire avec des mises retenues : chaque joueur retrouve sa mise (un seul ordre SQL, atomique).
+  await db.query(`
+    WITH due AS (
+      SELECT id, host_id, guest_id, stake, escrow FROM maf_rooms
+      WHERE status IN ('open','pending','ready','playing') AND updated_at < now() - interval '${ROOM_LIFETIME}'
+      FOR UPDATE
+    ), closed AS (
+      UPDATE maf_rooms r SET status='closed', closed_at=now(), updated_at=now(), escrow=0,
+        settled_at = CASE WHEN d.escrow > 0 THEN now() ELSE r.settled_at END
+      FROM due d WHERE r.id = d.id
+      RETURNING d.id AS id, d.host_id AS host_id, d.guest_id AS guest_id, d.stake AS stake, d.escrow AS escrow
+    ), logged AS (
+      INSERT INTO maf_wallet_audit(actor, event, details)
+      SELECT 'system:rooms', 'room_refund_expired', jsonb_build_object('room_id', id, 'amount_each', stake)
+      FROM closed WHERE escrow > 0
+      RETURNING id
+    ), refunds AS (
+      SELECT host_id AS uid, stake FROM closed WHERE escrow > 0
+      UNION ALL
+      SELECT guest_id AS uid, stake FROM closed WHERE escrow > 0 AND guest_id IS NOT NULL
+    )
+    UPDATE maf_users u SET balance = u.balance + s.total
+    FROM (SELECT uid, sum(stake)::integer AS total FROM refunds GROUP BY uid) s
+    WHERE u.id = s.uid`);
 }
+
+// ------------ ARGENT : verrous, retenue, paiement, remboursement ------------
+const audit = (client, event, details) => client.query(
+  'INSERT INTO maf_wallet_audit(actor,event,details) VALUES($1,$2,$3)',
+  ['system:rooms', event, JSON.stringify(details)]);
+
+// Toujours verrouiller les comptes dans l'ordre des identifiants (pas d'interblocage).
+async function lockUsers(client, ids) {
+  const sorted = [...new Set(ids.filter(Boolean))].sort((x, y) => x - y);
+  const { rows } = await client.query(
+    'SELECT id, balance FROM maf_users WHERE id = ANY($1::int[]) ORDER BY id FOR UPDATE', [sorted]);
+  return new Map(rows.map((row) => [row.id, row]));
+}
+
+// Match termine : la cagnotte (2 mises) va au gagnant.
+async function settleRoom(client, room, winnerSide) {
+  if (!(room.escrow > 0) || room.settled_at || !winnerSide) return;
+  const winnerId = winnerSide === 'host' ? room.host_id : room.guest_id;
+  await lockUsers(client, [room.host_id, room.guest_id]);
+  await client.query('UPDATE maf_users SET balance=balance+$2 WHERE id=$1', [winnerId, room.escrow]);
+  await client.query('UPDATE maf_rooms SET escrow=0, payout=$2, settled_at=now() WHERE id=$1', [room.id, room.escrow]);
+  await audit(client, 'room_payout', { room_id: Number(room.id), winner_id: winnerId, amount: room.escrow });
+}
+
+// Salon ferme avant la fin du match : chacun reprend sa mise.
+async function refundRoom(client, room) {
+  if (!(room.escrow > 0) || room.settled_at) return;
+  const ids = [room.host_id, room.guest_id].filter(Boolean);
+  await lockUsers(client, ids);
+  await client.query('UPDATE maf_users SET balance=balance+$2 WHERE id = ANY($1::int[])', [ids, room.stake]);
+  await client.query('UPDATE maf_rooms SET escrow=0, settled_at=now() WHERE id=$1', [room.id]);
+  await audit(client, 'room_refund', { room_id: Number(room.id), amount_each: room.stake, users: ids });
+}
+
+const NO_FUNDS_SELF = "Tu n'as pas assez de fonds sur ton compte pour cette mise. Recharge ton compte.";
+const NO_FUNDS_OTHER = "Ton adversaire n'a pas de fonds suffisants pour cette mise.";
+const ALERT_TTL_MS = 3 * 60 * 1000;
 
 async function transaction(fn) {
   const client = await pool.connect();
@@ -101,12 +167,26 @@ async function transaction(fn) {
 const SELECT = `SELECT r.*, h.pseudo AS host_pseudo, g.pseudo AS guest_pseudo
   FROM maf_rooms r JOIN maf_users h ON h.id=r.host_id
   LEFT JOIN maf_users g ON g.id=r.guest_id`;
+// Message de fonds insuffisants visible par les deux joueurs (pendant 3 minutes).
+function fundsAlert(row, viewerId) {
+  const alert = row.funds_alert;
+  if (!alert || !viewerId || ![row.host_id, row.guest_id].includes(viewerId)) return null;
+  if (!['open', 'pending'].includes(row.status)) return null;
+  if (!(Date.now() - Date.parse(alert.at) < ALERT_TTL_MS)) return null;
+  const mine = viewerId === row.host_id ? 'host' : 'guest';
+  const theirs = mine === 'host' ? 'guest' : 'host';
+  const self = !!alert[mine];
+  const other = !!alert[theirs];
+  return self || other ? { self, other } : null;
+}
 const shown = (row, viewerId = null) => ({
   id: Number(row.id), code: row.code.trim(), game: row.game,
   shots: row.shots, stake: row.stake, status: row.status,
   host: { id: row.host_id, pseudo: row.host_pseudo },
   guest: viewerId && [row.host_id, row.guest_id].includes(viewerId) && row.guest_id
     ? { id: row.guest_id, pseudo: row.guest_pseudo } : null,
+  escrow: row.escrow || 0, payout: row.payout || 0,
+  funds_alert: fundsAlert(row, viewerId),
   is_host: viewerId === row.host_id,
   is_guest: viewerId != null && viewerId === row.guest_id,
   created_at: row.created_at, updated_at: row.updated_at,
@@ -184,10 +264,11 @@ roomsRouter.post('/', requireSession, respond(async (req, res) => {
   if (game !== 'penalty') throw fail(400, 'Jeu indisponible.');
   if (!allowedShots.has(shots)) throw fail(400, 'Choisis 3, 5 ou 10 tirs par joueur.');
   if (!Number.isSafeInteger(stake) || stake < 100 || stake > 1_000_000)
-    throw fail(400, 'Mise de test : entre 100 et 1 000 000 F CFA.');
+    throw fail(400, 'Mise : entre 100 et 1 000 000 F CFA.');
   const room = await transaction(async (client) => {
-    const person = await client.query('SELECT id FROM maf_users WHERE id=$1', [req.userId]);
+    const person = await client.query('SELECT id, balance FROM maf_users WHERE id=$1', [req.userId]);
     if (!person.rows[0]) throw fail(401, 'Compte introuvable.');
+    if (person.rows[0].balance < stake) throw fail(402, NO_FUNDS_SELF);
     if (await activeMembership(client, req.userId))
       throw fail(409, 'Tu es deja dans un salon. Quitte-le avant d\'en creer un autre.');
     for (let attempt = 0; attempt < 35; attempt += 1) {
@@ -210,11 +291,20 @@ roomsRouter.post('/:id/join', requireSession, respond(async (req, res) => {
     if (original.status !== 'open') throw fail(409, 'Ce salon a deja une demande ou deux joueurs.');
     if (await activeMembership(client, req.userId))
       throw fail(409, 'Tu es deja dans un autre salon. Quitte-le avant de rejoindre celui-ci.');
-    await client.query(`UPDATE maf_rooms SET guest_id=$2,status='pending',updated_at=now()
+    const me = (await client.query('SELECT balance FROM maf_users WHERE id=$1', [req.userId])).rows[0];
+    if (!me) throw fail(401, 'Compte introuvable.');
+    if (me.balance < original.stake) {
+      // Le createur est prevenu aussi (alerte visible quelques minutes).
+      await client.query('UPDATE maf_rooms SET funds_alert=$2::jsonb WHERE id=$1',
+        [original.id, JSON.stringify({ host: false, guest: true, at: new Date().toISOString() })]);
+      return { noFunds: true };
+    }
+    await client.query(`UPDATE maf_rooms SET guest_id=$2,status='pending',funds_alert=NULL,updated_at=now()
       WHERE id=$1`, [original.id, req.userId]);
-    return load(client, original.id);
+    return { room: await load(client, original.id) };
   });
-  res.json({ room: shown(room, req.userId) });
+  if (room.noFunds) throw fail(402, NO_FUNDS_SELF);
+  res.json({ room: shown(room.room, req.userId) });
 }));
 
 roomsRouter.post('/:id/accept', requireSession, respond(async (req, res) => {
@@ -222,10 +312,31 @@ roomsRouter.post('/:id/accept', requireSession, respond(async (req, res) => {
     const original = await load(client, roomId(req.params.id));
     if (original.host_id !== req.userId) throw fail(403, 'Seul le createur peut accepter.');
     if (original.status !== 'pending') throw fail(409, 'Aucune demande en attente.');
-    await client.query(`UPDATE maf_rooms SET status='ready',updated_at=now() WHERE id=$1`, [original.id]);
-    return load(client, original.id);
+    const users = await lockUsers(client, [original.host_id, original.guest_id]);
+    const lacks = {
+      host: !(users.get(original.host_id)?.balance >= original.stake),
+      guest: !(users.get(original.guest_id)?.balance >= original.stake),
+    };
+    if (lacks.host || lacks.guest) {
+      // Rien n'est debite. Les deux joueurs verront chacun leur message.
+      await client.query('UPDATE maf_rooms SET funds_alert=$2::jsonb WHERE id=$1',
+        [original.id, JSON.stringify({ ...lacks, at: new Date().toISOString() })]);
+      return { lacks };
+    }
+    await client.query('UPDATE maf_users SET balance=balance-$2 WHERE id = ANY($1::int[])',
+      [[original.host_id, original.guest_id], original.stake]);
+    await client.query(`UPDATE maf_rooms SET status='ready',escrow=$2,funds_alert=NULL,updated_at=now() WHERE id=$1`,
+      [original.id, original.stake * 2]);
+    await audit(client, 'room_stakes_held', { room_id: Number(original.id), amount_each: original.stake,
+      users: [original.host_id, original.guest_id] });
+    return { room: await load(client, original.id) };
   });
-  res.json({ room: shown(room, req.userId) });
+  if (room.lacks) {
+    throw fail(402, room.lacks.host
+      ? NO_FUNDS_SELF + (room.lacks.guest ? ' ' + NO_FUNDS_OTHER : '')
+      : NO_FUNDS_OTHER + " Aucune mise n'a ete prelevee.");
+  }
+  res.json({ room: shown(room.room, req.userId) });
 }));
 
 roomsRouter.post('/:id/decline', requireSession, respond(async (req, res) => {
@@ -233,7 +344,7 @@ roomsRouter.post('/:id/decline', requireSession, respond(async (req, res) => {
     const original = await load(client, roomId(req.params.id));
     if (original.host_id !== req.userId) throw fail(403, 'Seul le createur peut refuser.');
     if (original.status !== 'pending') throw fail(409, 'Aucune demande a refuser.');
-    await client.query(`UPDATE maf_rooms SET guest_id=NULL,status='open',updated_at=now() WHERE id=$1`, [original.id]);
+    await client.query(`UPDATE maf_rooms SET guest_id=NULL,status='open',funds_alert=NULL,updated_at=now() WHERE id=$1`, [original.id]);
     return load(client, original.id);
   });
   res.json({ room: shown(room, req.userId) });
@@ -246,10 +357,11 @@ roomsRouter.post('/:id/leave', requireSession, respond(async (req, res) => {
       throw fail(403, 'Tu ne fais pas partie de ce salon.');
     if (original.status === 'finished') throw fail(409, 'Match termine. Cree un nouveau salon.');
     if (original.guest_id === req.userId && original.status === 'pending') {
-      await client.query(`UPDATE maf_rooms SET guest_id=NULL,status='open',updated_at=now() WHERE id=$1`, [original.id]);
+      await client.query(`UPDATE maf_rooms SET guest_id=NULL,status='open',funds_alert=NULL,updated_at=now() WHERE id=$1`, [original.id]);
       return null;
     }
     if (original.status === 'playing') throw fail(409, 'Match en cours : utilise Abandonner le match.');
+    await refundRoom(client, original); // salon pret : les deux mises retenues sont rendues
     await client.query(`UPDATE maf_rooms SET status='closed',closed_at=now(),updated_at=now() WHERE id=$1`, [original.id]);
     return null;
   });
@@ -319,6 +431,7 @@ roomsRouter.post('/:id/match/choose', requireSession, respond(async (req, res) =
     const status = state.finished ? 'finished' : 'playing';
     await client.query(`UPDATE maf_rooms SET status=$2, match_state=$3::jsonb, updated_at=now()
       WHERE id=$1`, [r.id, status, JSON.stringify(state)]);
+    if (state.finished) await settleRoom(client, r, state.winner);
     return load(client, r.id);
   });
   res.json({ room: shown(result, req.userId), ...visibleMatch(result, req.userId) });
@@ -337,6 +450,7 @@ roomsRouter.post('/:id/match/forfeit', requireSession, respond(async (req, res) 
     state.pending = { shooter: null, keeper: null };
     await client.query(`UPDATE maf_rooms SET status='finished', match_state=$2::jsonb,
       updated_at=now() WHERE id=$1`, [r.id, JSON.stringify(state)]);
+    await settleRoom(client, r, state.winner);
     return load(client, r.id);
   });
   res.json({ room: shown(result, req.userId), ...visibleMatch(result, req.userId) });
