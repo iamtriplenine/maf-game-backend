@@ -4,6 +4,7 @@ import { walletRouter } from "./wallet.js";
 import { pool } from "./db.js";
 import { authRouter } from "./auth.js";
 import { chatRouter } from "./chat.js";
+import { roomsRouter } from "./rooms.js";
 
 const app = express();
 app.use(express.json({ limit: "3mb" }));
@@ -36,6 +37,8 @@ app.get("/health", async (_req, res) => {
 app.use("/api", authRouter); // /api/register, /api/login, /api/me
 
 app.use("/api", chatRouter); // /api/chat
+
+app.use("/api/rooms", roomsRouter); // Salons publics (etape 1)
 
 app.use("/api", walletRouter);
 app.use((error, _req, res, _next) => {
