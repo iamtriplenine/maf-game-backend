@@ -175,6 +175,15 @@ export function offerDraw(state, side) {
   return state;
 }
 
+// L'auteur peut retirer sa proposition tant qu'elle n'a pas ete acceptee.
+// Aucun reglement du pot : le match se poursuit normalement.
+export function cancelDraw(state, side) {
+  if (state.finished) throw new Error('Partie terminee.');
+  if (state.drawOffer !== side) throw new Error('Aucune proposition de nulle a annuler.');
+  state.drawOffer = null;
+  return state;
+}
+
 export function respondDraw(state, side, accept) {
   if (state.finished) throw new Error('Partie terminee.');
   if (state.drawOffer !== other(side)) throw new Error('Aucune proposition de nulle a repondre.');

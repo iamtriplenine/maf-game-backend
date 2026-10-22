@@ -7,7 +7,7 @@ import { pool } from './db.js';
 import { ensureTable, readToken, requireSession } from './auth.js';
 import { ensureWallet } from './wallet.js';
 import { blankMatch, roleFor, recordChoice } from './penaltyEngine.js';
-import { blankCheckers, applyMove, offerDraw, respondDraw, forfeitCheckers, checkersView, MOVE_LIMIT_MS } from './checkersEngine.js';
+import { blankCheckers, applyMove, offerDraw, respondDraw, cancelDraw, forfeitCheckers, checkersView, MOVE_LIMIT_MS } from './checkersEngine.js';
 
 export const roomsRouter = Router();
 const allowedShots = new Set([3, 5, 10]);
@@ -569,7 +569,7 @@ roomsRouter.post('/:id/match/move', requireSession, respond(async (req, res) => 
   res.json({ room: shown(result, req.userId), ...visibleMatch(result, req.userId) });
 }));
 
-for (const action of ['offer', 'respond']) {
+for (const action of ['offer', 'respond', 'cancel']) {
   roomsRouter.post(`/:id/match/draw/${action}`, requireSession, respond(async (req, res) => {
     const result = await transaction(async (client) => {
       const r = await load(client, roomId(req.params.id));
@@ -581,6 +581,7 @@ for (const action of ['offer', 'respond']) {
       const state = r.match_state;
       try {
         if (action === 'offer') offerDraw(state, viewer);
+        else if (action === 'cancel') cancelDraw(state, viewer);
         else {
           if (typeof req.body?.accept !== 'boolean') throw new Error('Reponse invalide.');
           respondDraw(state, viewer, req.body.accept);
