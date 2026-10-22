@@ -280,6 +280,40 @@ roomsRouter.get('/', respond(async (req, res) => {
   res.json({ rooms: rows.map((r) => shown(r, optionalViewer(req))) });
 }));
 
+// MAF_FOOTBALL_LEADERBOARD_V1
+// Seuls les resultats reels : match termine, vainqueur valide et cagnotte reglee.
+// Les abandons/forfaits sont comptabilises comme des victoires ; les matchs nuls sont exclus.
+// Endpoint public : ne renvoie que pseudo et statistiques des matchs, jamais de donnees privees.
+roomsRouter.get('/leaderboard/football', respond(async (_req, res) => {
+  const { rows } = await pool.query(`
+    WITH finished AS (
+      SELECT host_id, guest_id, match_state->>'winner' AS winner, updated_at AS finished_at
+      FROM maf_rooms
+      WHERE game='penalty'
+        AND status='finished' AND settled_at IS NOT NULL AND payout > 0
+        AND guest_id IS NOT NULL AND match_state->>'winner' IN ('host', 'guest')
+    ), participations AS (
+      SELECT host_id AS user_id, winner='host' AS won, finished_at FROM finished
+      UNION ALL
+      SELECT guest_id AS user_id, winner='guest' AS won, finished_at FROM finished
+    ), stats AS (
+      SELECT user_id, count(*)::integer AS played,
+        count(*) FILTER (WHERE won)::integer AS wins,
+        count(*) FILTER (WHERE NOT won)::integer AS losses,
+        max(finished_at) FILTER (WHERE won) AS last_win
+      FROM participations GROUP BY user_id
+    )
+    SELECT u.pseudo, s.wins, s.losses, s.played
+    FROM stats s JOIN maf_users u ON u.id = s.user_id
+    ORDER BY s.wins DESC, s.losses ASC, s.last_win DESC NULLS LAST, s.user_id ASC
+    LIMIT 51
+  `);
+  res.json({ game:'penalty', players:rows.slice(0, 50).map((player, i) => ({
+    place:i+1, pseudo:player.pseudo, wins:player.wins,
+    losses:player.losses, played:player.played
+  })), hasMore:rows.length > 50 });
+}));
+
 // Ma participation : permet de retrouver un salon apres rechargement / reconnexion.
 roomsRouter.get('/mine', requireSession, respond(async (req, res) => {
   await expireRooms(pool);
