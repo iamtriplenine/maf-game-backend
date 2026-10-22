@@ -15,6 +15,7 @@ const RETURN_MS = 80_000;
 const ROOM_LIFETIME = '24 hours';
 const CODE_PATTERN = /^\d{4}$/;
 const directions = new Set(['left', 'center', 'right']);
+const checkersEmoteKinds = new Set(['laugh', 'smirk', 'clap']);
 const activeStatuses = ['open', 'pending', 'ready', 'playing'];
 const fail = (status, message) => Object.assign(new Error(message), { status });
 const respond = (fn) => async (req, res, next) => {
@@ -424,6 +425,14 @@ roomsRouter.post('/:id/leave', requireSession, respond(async (req, res) => {
 // ------------ MOTEUR DU MATCH : transactions atomiques, autorite du serveur ------------
 const side = (r, uid) => uid === r.host_id ? 'host' : uid === r.guest_id ? 'guest' : null;
 const other = (key) => key === 'host' ? 'guest' : 'host';
+function visibleCheckersEmote(state) {
+  const emote = state?.emote;
+  if (!emote || !['host', 'guest'].includes(emote.side) || !checkersEmoteKinds.has(emote.kind)) return null;
+  const at = Number(emote.at);
+  if (!Number.isFinite(at) || Date.now() - at > 4500) return null;
+  return { id: String(emote.id || ''), side: emote.side, kind: emote.kind, at };
+}
+
 function visibleMatch(r, uid) {
   const viewer = side(r, uid);
   if (!viewer) throw fail(403, 'Tu ne fais pas partie de ce match.');
@@ -436,6 +445,7 @@ function visibleMatch(r, uid) {
       returnDeadline: r.departures?.[viewer] ?? null,
       serverNow: Date.now(),
       moveDeadline: state.lastMoveAt == null ? null : state.lastMoveAt + MOVE_LIMIT_MS,
+      emote: visibleCheckersEmote(state),
     },
   };
   const shooter = state.turn % 2 === 0 ? 'host' : 'guest';
@@ -595,6 +605,30 @@ for (const action of ['offer', 'respond', 'cancel']) {
     res.json({ room: shown(result, req.userId), ...visibleMatch(result, req.userId) });
   }));
 }
+
+roomsRouter.post('/:id/match/emote', requireSession, respond(async (req, res) => {
+  const result = await transaction(async (client) => {
+    const r = await load(client, roomId(req.params.id));
+    const viewer = side(r, req.userId);
+    if (!viewer) throw fail(403, 'Tu ne participes pas a ce match.');
+    if (r.game !== 'checkers' || r.status !== 'playing' || !r.match_state)
+      throw fail(409, 'Aucune partie de dames en cours.');
+    if (r.departures?.[viewer]) throw fail(409, 'Reviens dans le match avant de reagir.');
+    const kind = req.body?.emote;
+    if (!checkersEmoteKinds.has(kind)) throw fail(400, 'Reaction invalide.');
+    const state = r.match_state;
+    state.emote = {
+      id: String(Date.now()) + '-' + Math.random().toString(36).slice(2, 8),
+      side: viewer,
+      kind,
+      at: Date.now(),
+    };
+    await client.query('UPDATE maf_rooms SET match_state=$2::jsonb,updated_at=now() WHERE id=$1', [r.id, JSON.stringify(state)]);
+    return load(client, r.id);
+  });
+  res.json({ room: shown(result, req.userId), ...visibleMatch(result, req.userId) });
+}));
+
 
 // Resultats recents, uniquement pour leurs deux joueurs, pendant 7 jours.
 roomsRouter.get('/results/recent', requireSession, respond(async (req, res) => {
