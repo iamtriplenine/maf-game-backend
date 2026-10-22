@@ -1,3 +1,5 @@
+> **IA : lis d'abord `INSTRUCTIONS-IA.md`** (methode de livraison : zip + bloc PowerShell).
+
 # maf-game-backend
 
 Serveur Node/Express heberge sur Render, avec base PostgreSQL Render.
