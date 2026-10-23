@@ -2,6 +2,7 @@
 // Mises REELLES : debitees quand le createur accepte l'adversaire, retenues sur le salon (escrow),
 // versees au gagnant a la fin du match, ou remboursees si le salon est ferme avant la fin.
 import crypto from 'node:crypto';
+import { initialDice, rollDice, diceView, validateDiceSettings } from './diceEngine.js'; // MAF_DICE_BACKEND_V1
 import { assertCanCreateRoom, assertHostAvailable } from './multiRooms.js'; // MAF_MULTIROOM_V1
 import { Router } from 'express';
 import { pool } from './db.js';
@@ -62,6 +63,8 @@ export function ensureRooms() {
       // Mise a niveau automatique des tables creees a l'etape 1.
       await client.query(`
         ALTER TABLE maf_rooms ADD COLUMN IF NOT EXISTS match_state jsonb;
+        ALTER TABLE maf_rooms ADD COLUMN IF NOT EXISTS dice_count smallint;
+        ALTER TABLE maf_rooms ADD COLUMN IF NOT EXISTS dice_mode text;
         ALTER TABLE maf_rooms ADD COLUMN IF NOT EXISTS departures jsonb NOT NULL DEFAULT '{}'::jsonb;
         ALTER TABLE maf_rooms ADD COLUMN IF NOT EXISTS escrow integer NOT NULL DEFAULT 0;
         ALTER TABLE maf_rooms ADD COLUMN IF NOT EXISTS payout integer NOT NULL DEFAULT 0;
@@ -69,11 +72,15 @@ export function ensureRooms() {
         ALTER TABLE maf_rooms ADD COLUMN IF NOT EXISTS funds_alert jsonb;
         ALTER TABLE maf_rooms DROP CONSTRAINT IF EXISTS maf_rooms_game_check;
         ALTER TABLE maf_rooms ADD CONSTRAINT maf_rooms_game_check
-          CHECK(game IN ('penalty', 'checkers', 'tank'));
+          CHECK(game IN ('penalty', 'checkers', 'tank', 'dice'));
         ALTER TABLE maf_rooms ALTER COLUMN shots DROP NOT NULL;
         ALTER TABLE maf_rooms DROP CONSTRAINT IF EXISTS maf_rooms_shots_check;
         ALTER TABLE maf_rooms ADD CONSTRAINT maf_rooms_shots_check
-          CHECK((game='penalty' AND shots IN (3,5,10)) OR (game IN ('checkers','tank') AND shots IS NULL));
+          CHECK((game='penalty' AND shots IN (3,5,10)) OR (game='dice' AND shots IN (1,3,5,10)) OR (game IN ('checkers','tank') AND shots IS NULL));
+        ALTER TABLE maf_rooms DROP CONSTRAINT IF EXISTS maf_rooms_dice_count_check;
+        ALTER TABLE maf_rooms ADD CONSTRAINT maf_rooms_dice_count_check CHECK ((game='dice' AND dice_count IN (1,2)) OR (game<>'dice' AND dice_count IS NULL));
+        ALTER TABLE maf_rooms DROP CONSTRAINT IF EXISTS maf_rooms_dice_mode_check;
+        ALTER TABLE maf_rooms ADD CONSTRAINT maf_rooms_dice_mode_check CHECK ((game='dice' AND dice_mode IN ('separate','cumulative') AND (shots<>1 OR dice_mode='separate')) OR (game<>'dice' AND dice_mode IS NULL));
         ALTER TABLE maf_rooms DROP CONSTRAINT IF EXISTS maf_rooms_status_check;
         ALTER TABLE maf_rooms ADD CONSTRAINT maf_rooms_status_check
           CHECK(status IN ('open', 'pending', 'ready', 'playing', 'finished', 'closed'));
@@ -200,7 +207,7 @@ async function resolveDepartures(client) {
       const state = room.game === 'tank' ? tankForfeit(room.match_state, loser, reason)
         : room.game === 'checkers' ? forfeitCheckers(room.match_state, loser, reason)
         : { ...room.match_state, finished:true, winner:loser === 'host' ? 'guest' : 'host',
-          forfeit:loser, forfeitReason:reason, pending:{shooter:null,keeper:null} };
+          forfeit:loser, forfeitReason:reason, draw:false, pending:room.game === 'dice' ? {host:null,guest:null} : {shooter:null,keeper:null} };
       await client.query(`UPDATE maf_rooms SET status='finished', match_state=$2::jsonb,
         departures='{}'::jsonb, updated_at=now() WHERE id=$1`, [room.id, JSON.stringify(state)]);
       await settleRoom(client, room, state.winner);
@@ -238,6 +245,7 @@ function fundsAlert(row, viewerId) {
 const shown = (row, viewerId = null) => ({
   id: Number(row.id), code: row.code.trim(), game: row.game,
   shots: row.shots, stake: row.stake, status: row.status,
+  dice_count: row.dice_count || null, dice_mode: row.dice_mode || null,
   host_busy: Boolean(row.host_busy),
   host: { id: row.host_id, pseudo: row.host_pseudo },
   guest: viewerId && [row.host_id, row.guest_id].includes(viewerId) && row.guest_id
@@ -363,10 +371,15 @@ roomsRouter.get('/:id', respond(async (req, res) => {
 }));
 
 roomsRouter.post('/', requireSession, respond(async (req, res) => {
-  const { game, shots, stake } = req.body || {};
-  if (!['penalty', 'checkers', 'tank'].includes(game)) throw fail(400, 'Jeu indisponible.');
+  const { game, shots, stake, diceCount, diceMode } = req.body || {};
+  if (!['penalty', 'checkers', 'tank', 'dice'].includes(game)) throw fail(400, 'Jeu indisponible.');
   if (game === 'penalty' && !allowedShots.has(shots)) throw fail(400, 'Choisis 3, 5 ou 10 tirs par joueur.');
   if (['checkers','tank'].includes(game) && shots != null) throw fail(400, 'Ce jeu ne demande pas de nombre de tirs.');
+  if (game === 'dice') {
+    try { validateDiceSettings(diceCount, shots, diceMode); }
+    catch (err) { throw fail(400, err.message); }
+  }
+  if (game !== 'dice' && (diceCount != null || diceMode != null)) throw fail(400, 'Parametres de des non autorises pour ce jeu.');
   if (!Number.isSafeInteger(stake) || stake < 100 || stake > 1_000_000)
     throw fail(400, 'Mise : entre 100 et 1 000 000 F CFA.');
   const room = await transaction(async (client) => {
@@ -378,8 +391,10 @@ roomsRouter.post('/', requireSession, respond(async (req, res) => {
       const code = String(crypto.randomInt(0, 10000)).padStart(4, '0');
       const used = await client.query('SELECT 1 FROM maf_rooms WHERE code=$1 AND status <> $2', [code, 'closed']);
       if (used.rowCount) continue;
-      const { rows } = await client.query(`INSERT INTO maf_rooms(code,host_id,game,shots,stake)
-        VALUES($1,$2,$3,$4,$5) RETURNING id`, [code, req.userId, game, game === 'penalty' ? shots : null, stake]);
+      const { rows } = await client.query(`INSERT INTO maf_rooms(code,host_id,game,shots,stake,dice_count,dice_mode)
+        VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id`, [code, req.userId, game,
+        ['penalty','dice'].includes(game) ? shots : null, stake,
+        game === 'dice' ? diceCount : null, game === 'dice' ? diceMode : null]);
       return load(client, rows[0].id);
     }
     throw fail(503, 'Aucun code libre. Reessaie un peu plus tard.');
@@ -489,6 +504,9 @@ function visibleMatch(r, uid) {
   if (!viewer) throw fail(403, 'Tu ne fais pas partie de ce match.');
   const state = r.match_state;
   if (!state) return { status: r.status, match: null };
+  if (r.game === 'dice') return { status:r.status, match:{ ...diceView(state, viewer),
+    opponentReturnDeadline:r.departures?.[other(viewer)] ?? null,
+    returnDeadline:r.departures?.[viewer] ?? null, serverNow:Date.now() } };
   if (r.game === 'tank') return {
     status: r.status, match: {
       ...tankView(state,viewer), viewer,
@@ -569,10 +587,33 @@ roomsRouter.post('/:id/match/start', requireSession, respond(async (req, res) =>
     if (r.host_id !== req.userId) throw fail(403, 'Seul le createur lance le match.');
     if (r.status !== 'ready') throw fail(409, 'Le match ne peut pas etre lance.');
     await client.query(`UPDATE maf_rooms SET status='playing', match_state=$2::jsonb,updated_at=now()
-      WHERE id=$1`, [r.id, JSON.stringify(r.game === 'tank' ? tankInitial(Number(r.id) * 9973, Date.now()) : r.game === 'checkers' ? { ...blankCheckers(), lastMoveAt: Date.now() } : blankMatch(r.shots))]);
+      WHERE id=$1`, [r.id, JSON.stringify(r.game === 'tank' ? tankInitial(Number(r.id) * 9973, Date.now()) : r.game === 'checkers' ? { ...blankCheckers(), lastMoveAt: Date.now() } : r.game === 'dice' ? initialDice(r.dice_count, r.shots, r.dice_mode) : blankMatch(r.shots))]);
     return load(client, r.id);
   });
   res.json({ room: shown(room, req.userId), ...visibleMatch(room, req.userId) });
+}));
+
+// Lancement simultane ou asynchrone par joueur, atomique et verifie par le serveur.
+roomsRouter.post('/:id/match/dice/roll', requireSession, respond(async (req,res) => {
+  const result = await transaction(async (client) => {
+    const room = await load(client, roomId(req.params.id));
+    const viewer = side(room, req.userId);
+    if (!viewer) throw fail(403, 'Tu ne participes pas a ce match.');
+    if (room.game !== 'dice' || room.status !== 'playing' || !room.match_state)
+      throw fail(409, 'Aucun duel de des en cours.');
+    if (room.departures?.[viewer]) throw fail(409, 'Reviens dans le match avant de lancer.');
+    const state = room.match_state;
+    try { rollDice(state, viewer); }
+    catch (error) { throw fail(409, error.message); }
+    await client.query('UPDATE maf_rooms SET match_state=$2::jsonb, status=$3,updated_at=now() WHERE id=$1',
+      [room.id, JSON.stringify(state), state.finished ? 'finished' : 'playing']);
+    if (state.finished) {
+      if (state.draw) await refundRoom(client, room);
+      else await settleRoom(client, room, state.winner);
+    }
+    return load(client, room.id);
+  });
+  res.json({room:shown(result,req.userId), ...visibleMatch(result,req.userId)});
 }));
 
 roomsRouter.post('/:id/match/choose', requireSession, respond(async (req, res) => {
@@ -607,6 +648,7 @@ roomsRouter.post('/:id/match/forfeit', requireSession, respond(async (req, res) 
     const state = r.match_state;
     if (r.game === 'tank') tankForfeit(state, viewer);
     else if (r.game === 'checkers') forfeitCheckers(state, viewer);
+    else if (r.game === 'dice') { state.winner = other(viewer); state.draw = false; state.finished = true; state.forfeit = viewer; state.pending = {host:null,guest:null}; }
     else {
       state.winner = other(viewer);
       state.finished = true;
@@ -762,6 +804,6 @@ roomsRouter.get('/results/recent', requireSession, respond(async (req, res) => {
     ORDER BY r.updated_at DESC LIMIT 10`, [req.userId]);
   res.json({ rooms: rows.map((r) => ({ ...shown(r, req.userId),
     result: { winner: r.match_state?.winner, draw: r.match_state?.draw || false,
-      scores: r.match_state?.scores, forfeit: r.match_state?.forfeit || null },
+      scores: r.match_state?.scores, dice: r.game === 'dice' ? {wins:r.match_state?.wins, totals:r.match_state?.totals, mode:r.match_state?.mode} : null, forfeit: r.match_state?.forfeit || null },
   })) });
 }));
