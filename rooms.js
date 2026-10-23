@@ -2,6 +2,7 @@
 // Mises REELLES : debitees quand le createur accepte l'adversaire, retenues sur le salon (escrow),
 // versees au gagnant a la fin du match, ou remboursees si le salon est ferme avant la fin.
 import crypto from 'node:crypto';
+import { assertCanCreateRoom, assertHostAvailable } from './multiRooms.js'; // MAF_MULTIROOM_V1
 import { Router } from 'express';
 import { pool } from './db.js';
 import { ensureTable, readToken, requireSession } from './auth.js';
@@ -217,7 +218,9 @@ export async function maintainRooms() {
 }
 
 // Liste des salons : uniquement des identites publiques et aucune donnee sensible.
-const SELECT = `SELECT r.*, h.pseudo AS host_pseudo, g.pseudo AS guest_pseudo
+const SELECT = `SELECT r.*, h.pseudo AS host_pseudo, g.pseudo AS guest_pseudo,
+  EXISTS (SELECT 1 FROM maf_rooms sibling WHERE sibling.host_id=r.host_id AND sibling.id<>r.id
+    AND sibling.status IN ('pending','ready','playing')) AS host_busy
   FROM maf_rooms r JOIN maf_users h ON h.id=r.host_id
   LEFT JOIN maf_users g ON g.id=r.guest_id`;
 // Message de fonds insuffisants visible par les deux joueurs (pendant 3 minutes).
@@ -235,6 +238,7 @@ function fundsAlert(row, viewerId) {
 const shown = (row, viewerId = null) => ({
   id: Number(row.id), code: row.code.trim(), game: row.game,
   shots: row.shots, stake: row.stake, status: row.status,
+  host_busy: Boolean(row.host_busy),
   host: { id: row.host_id, pseudo: row.host_pseudo },
   guest: viewerId && [row.host_id, row.guest_id].includes(viewerId) && row.guest_id
     ? { id: row.guest_id, pseudo: row.guest_pseudo } : null,
@@ -315,11 +319,21 @@ roomsRouter.get('/leaderboard/football', respond(async (_req, res) => {
 }));
 
 // Ma participation : permet de retrouver un salon apres rechargement / reconnexion.
+// Liste de tous mes salons : maximum 5 comme createur, 1 comme invite.
+roomsRouter.get('/mine/all', requireSession, respond(async (req, res) => {
+  await expireRooms(pool);
+  const { rows } = await pool.query(`${SELECT}
+    WHERE r.status IN ('open','pending','ready','playing') AND (r.host_id=$1 OR r.guest_id=$1)
+    ORDER BY CASE r.status WHEN 'playing' THEN 0 WHEN 'ready' THEN 1
+      WHEN 'pending' THEN 2 ELSE 3 END, r.updated_at DESC LIMIT 5`, [req.userId]);
+  res.json({ rooms: rows.map((r) => shown(r, req.userId)), max: 5 });
+}));
+
 roomsRouter.get('/mine', requireSession, respond(async (req, res) => {
   await expireRooms(pool);
   const { rows } = await pool.query(`${SELECT}
     WHERE r.status IN ('open','pending','ready','playing') AND (r.host_id=$1 OR r.guest_id=$1)
-    ORDER BY r.updated_at DESC LIMIT 1`, [req.userId]);
+    ORDER BY CASE r.status WHEN 'playing' THEN 0 WHEN 'ready' THEN 1 WHEN 'pending' THEN 2 ELSE 3 END, r.updated_at DESC LIMIT 1`, [req.userId]);
   res.json({ room: rows[0] ? shown(rows[0], req.userId) : null });
 }));
 
@@ -359,8 +373,7 @@ roomsRouter.post('/', requireSession, respond(async (req, res) => {
     const person = await client.query('SELECT id, balance FROM maf_users WHERE id=$1', [req.userId]);
     if (!person.rows[0]) throw fail(401, 'Compte introuvable.');
     if (person.rows[0].balance < stake) throw fail(402, NO_FUNDS_SELF);
-    if (await activeMembership(client, req.userId))
-      throw fail(409, 'Tu es deja dans un salon. Quitte-le avant d\'en creer un autre.');
+    await assertCanCreateRoom(client, req.userId, game);
     for (let attempt = 0; attempt < 35; attempt += 1) {
       const code = String(crypto.randomInt(0, 10000)).padStart(4, '0');
       const used = await client.query('SELECT 1 FROM maf_rooms WHERE code=$1 AND status <> $2', [code, 'closed']);
@@ -379,6 +392,7 @@ roomsRouter.post('/:id/join', requireSession, respond(async (req, res) => {
     const original = await load(client, roomId(req.params.id));
     if (original.host_id === req.userId) throw fail(400, 'Tu es deja le createur de ce salon.');
     if (original.status !== 'open') throw fail(409, 'Ce salon a deja une demande ou deux joueurs.');
+    await assertHostAvailable(client, original.host_id, original.id);
     if (await activeMembership(client, req.userId))
       throw fail(409, 'Tu es deja dans un autre salon. Quitte-le avant de rejoindre celui-ci.');
     const me = (await client.query('SELECT balance FROM maf_users WHERE id=$1', [req.userId])).rows[0];
@@ -402,6 +416,7 @@ roomsRouter.post('/:id/accept', requireSession, respond(async (req, res) => {
     const original = await load(client, roomId(req.params.id));
     if (original.host_id !== req.userId) throw fail(403, 'Seul le createur peut accepter.');
     if (original.status !== 'pending') throw fail(409, 'Aucune demande en attente.');
+    await assertHostAvailable(client, original.host_id, original.id);
     const users = await lockUsers(client, [original.host_id, original.guest_id]);
     const lacks = {
       host: !(users.get(original.host_id)?.balance >= original.stake),
