@@ -67,6 +67,7 @@ export function ensureWallet() {
           uses integer NOT NULL DEFAULT 0, active boolean NOT NULL DEFAULT true,
           expires_at timestamptz, created_at timestamptz NOT NULL DEFAULT now()
         );
+        ALTER TABLE maf_coupons ADD COLUMN IF NOT EXISTS target_client_id integer REFERENCES maf_users(client_id);
         CREATE TABLE IF NOT EXISTS maf_coupon_uses (
           code text NOT NULL REFERENCES maf_coupons(code), user_id integer NOT NULL REFERENCES maf_users(id),
           created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(code,user_id)
@@ -282,6 +283,8 @@ walletRouter.post('/wallet/coupons/redeem', route(async (req,res) => {
     const u = await user(c,req.userId);
     const coupon = (await c.query('SELECT * FROM maf_coupons WHERE code=$1 FOR UPDATE',[code])).rows[0];
     if (!coupon) throw fail(404,'Coupon introuvable.');
+    if (coupon.target_client_id != null && coupon.target_client_id !== u.client_id)
+      throw fail(403,'Ce coupon est dédié à une personne spécifique.');
     const used = (await c.query('SELECT 1 FROM maf_coupon_uses WHERE code=$1 AND user_id=$2',[code,u.id])).rowCount;
     if (used) return { user:publicUser(u),already_used:true,amount:coupon.amount,currency:coupon.currency };
     if (!coupon.active || coupon.uses >= coupon.max_uses || (coupon.expires_at && new Date(coupon.expires_at) <= new Date()))
@@ -413,7 +416,9 @@ walletRouter.post('/admin/coupons', route(async (req,res) => {
   const code = couponCode(req.body.code === undefined ? 'MAF-'+crypto.randomBytes(12).toString('hex').toUpperCase() : req.body.code);
   if (code === (process.env.ADMIN_TEST_ACCESS_CODE || '00999').trim().toUpperCase())
     throw fail(400,'Ce code est reserve a l acces administrateur.');
-  const { amount:value, currency='F', max_uses=1, expires_at=null } = req.body;
+  const { amount:value, currency='F', max_uses=1, expires_at=null, target_client_id=null } = req.body;
+  if (target_client_id !== null && (!Number.isInteger(target_client_id) || target_client_id < 10000 || target_client_id > 99999))
+    throw fail(400,'ID client à 5 chiffres requis.');
   if (!Number.isSafeInteger(value) || value < 1 || value > MAX || !['F','V'].includes(currency) ||
     !Number.isSafeInteger(max_uses) || max_uses < 1 || max_uses > 100000) throw fail(400,'Parametres du coupon invalides.');
   if (expires_at !== null && (typeof expires_at !== 'string' || !Number.isFinite(Date.parse(expires_at))))
@@ -421,15 +426,17 @@ walletRouter.post('/admin/coupons', route(async (req,res) => {
   const result = await tx(async c => {
     // Meme code + memes parametres : une reponse perdue ne cree pas de second coupon.
     await c.query('SELECT pg_advisory_xact_lock(62498104)');
+    if (target_client_id !== null && !(await c.query('SELECT 1 FROM maf_users WHERE client_id=$1',[target_client_id])).rowCount)
+      throw fail(404,'Aucun client ne correspond à cet ID.');
     const prior = (await c.query('SELECT * FROM maf_coupons WHERE code=$1 FOR UPDATE',[code])).rows[0];
     if (prior) {
-      if (prior.amount !== value || prior.currency !== currency || prior.max_uses !== max_uses ||
+      if (prior.amount !== value || prior.currency !== currency || prior.max_uses !== max_uses || (prior.target_client_id ?? null) !== target_client_id ||
         (prior.expires_at ? new Date(prior.expires_at).getTime() : null) !== (expires_at ? Date.parse(expires_at) : null))
         throw fail(409,'Ce code existe deja avec d autres parametres.');
       return { coupon:couponView(prior),already_exists:true };
     }
     if (expires_at !== null && Date.parse(expires_at) <= Date.now()) throw fail(400,'Date expiration future requise.');
-    const row = (await c.query(`INSERT INTO maf_coupons(code,amount,currency,max_uses,expires_at) VALUES($1,$2,$3,$4,$5) RETURNING *`,[code,value,currency,max_uses,expires_at])).rows[0];
+    const row = (await c.query(`INSERT INTO maf_coupons(code,amount,currency,max_uses,expires_at,target_client_id) VALUES($1,$2,$3,$4,$5,$6) RETURNING *`,[code,value,currency,max_uses,expires_at,target_client_id])).rows[0];
     await audit(c,req.adminActor,'coupon_created',row);
     return { coupon:couponView(row),already_exists:false };
   }); res.status(result.already_exists ? 200 : 201).json(result);
