@@ -4,7 +4,7 @@ import { withdrawalFees } from './ownerFees.js';
 import { createTestAdminAccess, adminActor } from './adminAccess.js';
 import { Router } from 'express';
 import { pool } from './db.js';
-import { ensureTable, requireSession, publicUser } from './auth.js';
+import { ensureTable, requireSession, publicUser, readToken } from './auth.js'; // MAF_OWNER_ADMIN_V1
 
 export const walletRouter = Router();
 const MIN = 100, MAX = 1_000_000;
@@ -150,8 +150,16 @@ walletRouter.use('/wallet', requireSession);
 walletRouter.use('/admin', (req, res, next) => {
   res.set('Cache-Control','no-store');
   req.adminActor = adminActor(req);
-  if (!req.adminActor) return res.status(403).json({ error: 'Acces administrateur refuse ou expire. Rouvre le panel depuis Coupons.' });
-  next();
+  if (req.adminActor) return next();
+  // Acces direct reserve au compte proprietaire authentifie.
+  const header = String(req.headers.authorization || '');
+  const session = readToken(header.startsWith('Bearer ') ? header.slice(7) : '');
+  if (!session || !Number.isSafeInteger(session.uid)) return res.status(403).json({error:'Acces administrateur refuse.'});
+  pool.query('SELECT pseudo_key FROM maf_users WHERE id=$1',[session.uid]).then(({rows}) => {
+    if (rows[0]?.pseudo_key !== '999') return res.status(403).json({error:'Acces administrateur refuse.'});
+    req.adminActor = 'admin:owner:' + session.uid;
+    next();
+  }).catch(next);
 });
 walletRouter.get('/wallet', route(async (req,res) => {
   const result = await pool.query('SELECT * FROM maf_users WHERE id=$1',[req.userId]);
@@ -300,6 +308,13 @@ walletRouter.get('/admin/transactions', route(async (req,res) => {
   const total = (await pool.query(`SELECT count(*)::integer AS total FROM maf_transactions
     WHERE ($1::text IS NULL OR status=$1) AND ($2::text IS NULL OR kind=$2)`,[status,kind])).rows[0].total;
   res.json({ transactions:rows.map(view),total,limit,offset });
+}));
+walletRouter.get('/admin/transactions/:id', route(async (req,res) => {
+  key(req.params.id);
+  const {rows} = await pool.query(`SELECT t.id,t.user_id,u.pseudo,t.kind,t.amount,t.fee_amount,t.owner_fee_amount,t.currency,t.phone,t.status,t.proof_hash,
+    t.payment_reference,t.admin_note,t.created_at,t.submitted_at,t.decided_at FROM maf_transactions t JOIN maf_users u ON u.id=t.user_id WHERE t.id=$1`,[req.params.id]);
+  if (!rows[0]) throw fail(404,'Demande introuvable.');
+  res.json({transaction:view(rows[0])});
 }));
 walletRouter.get('/admin/transactions/:id/proof', route(async (req,res) => {
   key(req.params.id);
