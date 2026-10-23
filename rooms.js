@@ -16,7 +16,7 @@ import { blankCheckers, applyMove, offerDraw, respondDraw, cancelDraw, forfeitCh
 export const roomsRouter = Router();
 const allowedShots = new Set([3, 5, 10]);
 const RETURN_MS = 80_000;
-const ROOM_LIFETIME = '24 hours';
+const ROOM_LIFETIME = '30 minutes'; // Delai fixe depuis created_at. MAF_ROOM_30M_POLICY_V1
 const CODE_PATTERN = /^\d{4}$/;
 const directions = new Set(['left', 'center', 'right']);
 const checkersEmoteKinds = new Set(['laugh', 'smirk', 'clap']);
@@ -97,6 +97,26 @@ export function ensureRooms() {
         CREATE INDEX IF NOT EXISTS maf_rooms_guest_active
           ON maf_rooms(guest_id) WHERE status <> 'closed';
       `);
+
+      // MAF_ROOM_30M_POLICY_V1: une seule reinitialisation apres le premier deploiement.
+      // Ne pas supprimer les parties acceptees ni les mises en escrow.
+      await client.query(`CREATE TABLE IF NOT EXISTS maf_room_policy_migrations (
+        migration_key text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now(),
+        reset_count integer NOT NULL DEFAULT 0
+      )`);
+      const policyMigration = await client.query(
+        "INSERT INTO maf_room_policy_migrations(migration_key) VALUES('maf_rooms_30min_v1') ON CONFLICT DO NOTHING RETURNING migration_key"
+      );
+      if (policyMigration.rowCount > 0) {
+        const reset = await client.query(`UPDATE maf_rooms
+          SET status='closed', closed_at=now(), updated_at=now()
+          WHERE status IN ('open','pending') AND escrow=0 RETURNING id`);
+        await client.query(
+          "UPDATE maf_room_policy_migrations SET reset_count=$1 WHERE migration_key='maf_rooms_30min_v1'",
+          [reset.rowCount]
+        );
+        console.info('Salons en attente reinitialises (une seule fois):', reset.rowCount);
+      }
       await client.query('COMMIT');
     } catch (error) { await client.query('ROLLBACK'); throw error; }
     finally { client.release(); }
@@ -104,14 +124,15 @@ export function ensureRooms() {
   return ready;
 }
 
-// Fermer automatiquement les salons inactifs apres 24 heures.
-// S'applique egalement aux salons qui attendaient le lancement du jeu.
+// Fermer les salons en attente 30 minutes apres creation; preserver les matchs acceptes.
+// Les parties acceptees gardent leur protection historique de 24 h contre les abandons.
 async function expireRooms(db) {
   // Un salon expire avec des mises retenues : chaque joueur retrouve sa mise (un seul ordre SQL, atomique).
   await db.query(`
     WITH due AS (
       SELECT id, host_id, guest_id, stake, escrow FROM maf_rooms
-      WHERE status IN ('open','pending','ready','playing') AND updated_at < now() - interval '${ROOM_LIFETIME}'
+      WHERE (status IN ('open','pending') AND created_at <= now() - interval '${ROOM_LIFETIME}')
+         OR (status IN ('ready','playing') AND updated_at < now() - interval '24 hours')
       FOR UPDATE
     ), closed AS (
       UPDATE maf_rooms r SET status='closed', closed_at=now(), updated_at=now(), escrow=0,
@@ -257,6 +278,7 @@ const shown = (row, viewerId = null) => ({
   funds_alert: fundsAlert(row, viewerId),
   is_host: viewerId === row.host_id,
   is_guest: viewerId != null && viewerId === row.guest_id,
+  expires_at: ['open','pending'].includes(row.status) ? new Date(Date.parse(row.created_at) + 30*60*1000).toISOString() : null,
   created_at: row.created_at, updated_at: row.updated_at,
 });
 const optionalViewer = (req) => {
