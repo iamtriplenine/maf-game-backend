@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import { promisify } from "node:util";
 import { Router } from "express";
 import { pool } from "./db.js";
+import { ensureClientIds } from "./clientIds.js";
 
 const scrypt = promisify(crypto.scrypt);
 
@@ -37,6 +38,7 @@ export function ensureTable() {
       .then(() => pool.query(
         "alter table maf_users add column if not exists skin_id text not null default 'loki'"
       ))
+      .then(() => ensureClientIds(pool))
       .catch((error) => {
         tableReady = null;
         throw error;
@@ -96,7 +98,7 @@ function addFailure(key) {
 }
 
 export const publicUser = (row) => ({
-  id: row.id, pseudo: row.pseudo, balance: row.balance,
+  id: row.id, client_id: row.client_id, pseudo: row.pseudo, balance: row.balance,
   skin_id: row.skin_id || "loki",
   bonus_balance: row.bonus_balance || 0, phone: row.phone || null,
   phone_registered_at: row.phone_registered_at || null,

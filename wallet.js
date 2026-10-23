@@ -479,8 +479,8 @@ walletRouter.get('/admin/users', route(async (req,res) => {
   const limit = Math.floor(Math.min(100,Math.max(1,Number(req.query.limit)||25)));
   const offset = Math.floor(Math.max(0,Number(req.query.offset)||0));
   if (!Number.isFinite(offset)) throw fail(400,'Pagination invalide.');
-  const where = "($1::text='' OR strpos(lower(pseudo),lower($1))>0 OR strpos(coalesce(phone,''),$1)>0 OR id::text=$1)";
-  const { rows } = await pool.query(`SELECT id,pseudo,balance,bonus_balance,phone,created_at,
+  const where = "($1::text='' OR strpos(lower(pseudo),lower($1))>0 OR strpos(coalesce(phone,''),$1)>0 OR id::text=$1 OR client_id::text=$1)";
+  const { rows } = await pool.query(`SELECT id,client_id,pseudo,balance,bonus_balance,phone,created_at,
     phone_registered_at,phone_verified_at,phone_verification_deadline FROM maf_users
     WHERE ${where} ORDER BY created_at DESC,id DESC LIMIT $2 OFFSET $3`,[q,limit,offset]);
   const total = (await pool.query(`SELECT count(*)::integer AS total FROM maf_users WHERE ${where}`,[q])).rows[0].total;
