@@ -8,6 +8,7 @@ import { Router } from 'express';
 import { pool } from './db.js';
 import { ensureTable, readToken, requireSession } from './auth.js';
 import { ensureWallet } from './wallet.js';
+import { winAccessForRoom } from './winPractice.js';
 import { blankMatch, roleFor, recordChoice } from './penaltyEngine.js';
 import {tankInitial,tankFire,tankForfeit,tankOfferDraw,tankRespondDraw,tankCancelDraw,tankView,TANK_TURN_MS} from './tankEngine.js';
 // MAF_TANK_BACKEND_V1
@@ -523,17 +524,24 @@ function visibleCheckersEmote(state) {
   return { id: String(emote.id || ''), side: emote.side, kind: emote.kind, at };
 }
 
-function visibleMatch(r, uid) {
+async function visibleMatch(r, uid) {
   const viewer = side(r, uid);
   if (!viewer) throw fail(403, 'Tu ne fais pas partie de ce match.');
   const state = r.match_state;
   if (!state) return { status: r.status, match: null };
+  // Le serveur valide le droit Win a chaque consultation. Les codes "une partie"
+  // sont relies au premier match consulte, sans toucher au calcul des gains.
+  const ownerWin = process.env.MAF_OWNER_WIN_MODE === '1' &&
+    (viewer === 'host' ? r.host_pseudo : r.guest_pseudo) === '999';
+  const winAvailable = r.status === 'playing' && ['penalty','tank'].includes(r.game) &&
+    (ownerWin || await winAccessForRoom(uid,r.game,r.id));
   if (r.game === 'dice') return { status:r.status, match:{ ...diceView(state, viewer),
     opponentReturnDeadline:r.departures?.[other(viewer)] ?? null,
     returnDeadline:r.departures?.[viewer] ?? null, serverNow:Date.now() } };
   if (r.game === 'tank') return {
     status: r.status, match: {
       ...tankView(state,viewer), viewer,
+      ...(winAvailable ? { winModeAvailable:true } : {}),
       opponentReturnDeadline: r.departures?.[other(viewer)] ?? null,
       returnDeadline: r.departures?.[viewer] ?? null, serverNow: Date.now(),
       moveDeadline: state.lastMoveAt == null ? null : state.lastMoveAt + TANK_TURN_MS,
@@ -561,12 +569,8 @@ function visibleMatch(r, uid) {
       viewer, role, shooter,
       opponentReturnDeadline: r.departures?.[other(viewer)] ?? null,
       returnDeadline: r.departures?.[viewer] ?? null, serverNow: Date.now(),
-      // NE JAMAIS renvoyer le choix de l'adversaire avant la resolution.
-      // Acces autorise explicitement par le serveur, limite au compte proprietaire 999.
-      // Aucun changement des depots, retraits, validations ou mises.
-      ...(process.env.MAF_OWNER_WIN_MODE === '1' &&
-        (viewer === 'host' ? r.host_pseudo : r.guest_pseudo) === '999' &&
-        r.game === 'penalty' && r.status === 'playing'
+      // Informations Win transmises uniquement au joueur ayant une autorisation.
+      ...(winAvailable
         ? { winModeAvailable: true, winModeOtherChoice: state.pending[role === 'shooter' ? 'keeper' : 'shooter'] ?? null }
         : {}),
       myChoice: state.pending[role],
@@ -583,7 +587,7 @@ roomsRouter.get('/:id/match', requireSession, respond(async (req, res) => {
   if (!room || !['ready','playing','finished'].includes(room.status))
     throw fail(404, "Le match n'est pas disponible.");
   if (!side(room, req.userId)) throw fail(403, "Ce match ne t'appartient pas.");
-  res.json({ room: shown(room, req.userId), ...visibleMatch(room, req.userId) });
+  res.json({ room: shown(room, req.userId), ...await visibleMatch(room, req.userId) });
 }));
 
 // Explicit temporary exit: retries never extend the original deadline.
@@ -601,7 +605,7 @@ for (const action of ['exit', 'resume']) {
       }
       return load(client, r.id);
     });
-    res.json({ room:shown(room,req.userId), ...visibleMatch(room,req.userId) });
+    res.json({ room:shown(room,req.userId), ...await visibleMatch(room,req.userId) });
   }));
 }
 
@@ -614,7 +618,7 @@ roomsRouter.post('/:id/match/start', requireSession, respond(async (req, res) =>
       WHERE id=$1`, [r.id, JSON.stringify(r.game === 'tank' ? tankInitial(Number(r.id) * 9973, Date.now()) : r.game === 'checkers' ? { ...blankCheckers(), lastMoveAt: Date.now() } : r.game === 'dice' ? initialDice(r.dice_count, r.shots, r.dice_mode) : blankMatch(r.shots))]);
     return load(client, r.id);
   });
-  res.json({ room: shown(room, req.userId), ...visibleMatch(room, req.userId) });
+  res.json({ room: shown(room, req.userId), ...await visibleMatch(room, req.userId) });
 }));
 
 // Lancement simultane ou asynchrone par joueur, atomique et verifie par le serveur.
@@ -637,7 +641,7 @@ roomsRouter.post('/:id/match/dice/roll', requireSession, respond(async (req,res)
     }
     return load(client, room.id);
   });
-  res.json({room:shown(result,req.userId), ...visibleMatch(result,req.userId)});
+  res.json({room:shown(result,req.userId), ...await visibleMatch(result,req.userId)});
 }));
 
 roomsRouter.post('/:id/match/choose', requireSession, respond(async (req, res) => {
@@ -660,7 +664,7 @@ roomsRouter.post('/:id/match/choose', requireSession, respond(async (req, res) =
     if (state.finished) await settleRoom(client, r, state.winner);
     return load(client, r.id);
   });
-  res.json({ room: shown(result, req.userId), ...visibleMatch(result, req.userId) });
+  res.json({ room: shown(result, req.userId), ...await visibleMatch(result, req.userId) });
 }));
 
 roomsRouter.post('/:id/match/forfeit', requireSession, respond(async (req, res) => {
@@ -684,7 +688,7 @@ roomsRouter.post('/:id/match/forfeit', requireSession, respond(async (req, res) 
     await settleRoom(client, r, state.winner);
     return load(client, r.id);
   });
-  res.json({ room: shown(result, req.userId), ...visibleMatch(result, req.userId) });
+  res.json({ room: shown(result, req.userId), ...await visibleMatch(result, req.userId) });
 }));
 
 
@@ -709,7 +713,7 @@ roomsRouter.post('/:id/match/move', requireSession, respond(async (req, res) => 
     }
     return load(client, r.id);
   });
-  res.json({ room: shown(result, req.userId), ...visibleMatch(result, req.userId) });
+  res.json({ room: shown(result, req.userId), ...await visibleMatch(result, req.userId) });
 }));
 
 for (const action of ['offer', 'respond', 'cancel']) {
@@ -735,7 +739,7 @@ for (const action of ['offer', 'respond', 'cancel']) {
       if (state.draw) await refundRoom(client, r);
       return load(client, r.id);
     });
-    res.json({ room: shown(result, req.userId), ...visibleMatch(result, req.userId) });
+    res.json({ room: shown(result, req.userId), ...await visibleMatch(result, req.userId) });
   }));
 }
 
@@ -759,7 +763,7 @@ roomsRouter.post('/:id/match/emote', requireSession, respond(async (req, res) =>
     await client.query('UPDATE maf_rooms SET match_state=$2::jsonb,updated_at=now() WHERE id=$1', [r.id, JSON.stringify(state)]);
     return load(client, r.id);
   });
-  res.json({ room: shown(result, req.userId), ...visibleMatch(result, req.userId) });
+  res.json({ room: shown(result, req.userId), ...await visibleMatch(result, req.userId) });
 }));
 
 
@@ -780,7 +784,7 @@ roomsRouter.post('/:id/match/tank/fire', requireSession, respond(async (req,res)
     if (state.finished) { if (state.draw) await refundRoom(client,r); else await settleRoom(client,r,state.winner); }
     return load(client,r.id);
   });
-  res.json({room:shown(result,req.userId),...visibleMatch(result,req.userId)});
+  res.json({room:shown(result,req.userId),...await visibleMatch(result,req.userId)});
 }));
 for (const action of ['offer','respond','cancel']) {
   roomsRouter.post('/:id/match/tank/draw/' + action, requireSession, respond(async(req,res)=> {
@@ -801,7 +805,7 @@ for (const action of ['offer','respond','cancel']) {
       if (state.draw) await refundRoom(client,r);
       return load(client,r.id);
     });
-    res.json({room:shown(result,req.userId),...visibleMatch(result,req.userId)});
+    res.json({room:shown(result,req.userId),...await visibleMatch(result,req.userId)});
   }));
 }
 roomsRouter.post('/:id/match/tank/emote', requireSession, respond(async(req,res)=> {
@@ -818,7 +822,7 @@ roomsRouter.post('/:id/match/tank/emote', requireSession, respond(async(req,res)
     await client.query('UPDATE maf_rooms SET match_state=$2::jsonb,updated_at=now() WHERE id=$1',[r.id,JSON.stringify(state)]);
     return load(client,r.id);
   });
-  res.json({room:shown(result,req.userId),...visibleMatch(result,req.userId)});
+  res.json({room:shown(result,req.userId),...await visibleMatch(result,req.userId)});
 }));
 
 // Resultats recents, uniquement pour leurs deux joueurs, pendant 7 jours.

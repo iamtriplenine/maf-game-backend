@@ -1,5 +1,5 @@
-// Codes de Mode Win pour les parties SOLO (sans mise) exclusivement.
-// Aucun acces aux parties multijoueurs, aux choix caches de l'adversaire ou aux soldes.
+// Codes Win temporaires : assignation a un compte, a un jeu et a une partie eventuelle.
+// Les regles des salons, les debits et les versements ne sont pas modifies.
 import crypto from 'node:crypto';
 import { Router } from 'express';
 import { pool } from './db.js';
@@ -28,10 +28,12 @@ export function ensureWinPractice() {
       redeemed_at timestamptz,
       expires_at timestamptz,
       matches_left integer,
+      match_room_id bigint,
       created_at timestamptz NOT NULL DEFAULT now(),
       CHECK ((kind='duration' AND duration_seconds IS NOT NULL) OR
              (kind='match' AND duration_seconds IS NULL))
     )`);
+    await pool.query('ALTER TABLE maf_win_practice_codes ADD COLUMN IF NOT EXISTS match_room_id bigint');
     await pool.query('CREATE INDEX IF NOT EXISTS maf_win_practice_redeemed_by ON maf_win_practice_codes(redeemed_by)');
   })().catch(e => { ready = null; throw e; });
   return ready;
@@ -43,7 +45,7 @@ function view(row) {
     expires_at:new Date(row.expires_at).toISOString(),
     matches_left:row.matches_left ?? null,
     active:new Date(row.expires_at).getTime() > Date.now() &&
-      (row.kind !== 'match' || row.matches_left > 0)};
+      (row.kind !== 'match' || row.matches_left > 0 || row.match_room_id != null)};
 }
 async function requireOwner(req) {
   const { rows } = await pool.query('SELECT pseudo_key FROM maf_users WHERE id=$1',[req.userId]);
@@ -128,3 +130,28 @@ winPracticeRouter.post('/start', run(async (req,res) => {
   } catch(e) { await client.query('ROLLBACK'); throw e; }
   finally { client.release(); }
 }));
+
+
+// Autorisation par le serveur, jamais a partir d'un simple drapeau du navigateur.
+// La premiere lecture d'un match a deux consomme atomiquement les codes "une partie" :
+// les appels suivants du MEME match restent autorises; les autres salons ne le sont pas.
+export async function winAccessForRoom(userId, game, roomId) {
+  if (!['penalty','tank'].includes(game) || !Number.isSafeInteger(Number(roomId)) || Number(roomId) < 1) return false;
+  await ensureWinPractice();
+  const { rowCount } = await pool.query(`
+    UPDATE maf_win_practice_codes AS win
+    SET matches_left = CASE WHEN win.kind='match' AND win.match_room_id IS NULL THEN 0 ELSE win.matches_left END,
+        match_room_id = CASE WHEN win.kind='match' AND win.match_room_id IS NULL THEN $3::bigint ELSE win.match_room_id END
+    WHERE win.code = (
+      SELECT code FROM maf_win_practice_codes
+      WHERE redeemed_by=$1 AND expires_at>now() AND (game='all' OR game=$2)
+        AND (kind='duration' OR match_room_id=$3::bigint OR (matches_left=1 AND match_room_id IS NULL))
+      ORDER BY redeemed_at DESC LIMIT 1
+    )
+      AND win.redeemed_by=$1 AND win.expires_at>now() AND (win.game='all' OR win.game=$2)
+      AND (win.kind='duration' OR win.match_room_id=$3::bigint
+           OR (win.matches_left=1 AND win.match_room_id IS NULL))
+    RETURNING win.code
+  `, [userId,game,String(roomId)]);
+  return rowCount > 0;
+}
