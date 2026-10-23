@@ -78,19 +78,54 @@ function sampleFlight(terrain, tank, opponent, angle, power, weapon, side) {
   }
   return { impact: {x: rounded(clamp(x,0,100)), y: rounded(clamp(y,0,99))}, points:shots };
 }
-function explosion(state, point, config, hits) {
-  const before = state.terrain;
-  state.terrain = tankCarve(before, point.x, config.radius, config.crater);
-  for (const side of ['host','guest']) {
-    const tank = state.tanks[side];
-    const tankY = tankSurface(before,tank.x) - 2;
+// Effet pur d'une explosion : nouveau terrain + degats par char (ne modifie rien).
+function blastEffect(terrain, tanks, point, config) {
+  const next = tankCarve(terrain, point.x, config.radius, config.crater);
+  const hits = { host: 0, guest: 0 };
+  for (const side of ['host', 'guest']) {
+    const tank = tanks[side];
+    const tankY = tankSurface(terrain, tank.x) - 2;
     const dist = Math.hypot(tank.x - point.x, tankY - point.y);
     const splash = Math.max(0, 1 - dist / (config.radius + 3));
-    const drop = Math.max(0, tankSurface(state.terrain,tank.x) - tankSurface(before,tank.x));
-    const damage = Math.max(0, Math.round(config.damage * splash) + Math.floor(drop / 4));
-    tank.hp = Math.max(0, tank.hp - damage);
-    hits[side] += damage;
+    const drop = Math.max(0, tankSurface(next, tank.x) - tankSurface(terrain, tank.x));
+    hits[side] = Math.max(0, Math.round(config.damage * splash) + Math.floor(drop / 4));
   }
+  return { terrain: next, hits };
+}
+function explosion(state, point, config, hits) {
+  const effect = blastEffect(state.terrain, state.tanks, point, config);
+  state.terrain = effect.terrain;
+  for (const side of ['host', 'guest']) {
+    const tank = state.tanks[side];
+    tank.hp = Math.max(0, tank.hp - effect.hits[side]);
+    hits[side] += effect.hits[side];
+  }
+}
+const CLUSTER_BLAST = { damage: 8, radius: 4, crater: 3 };
+// Simulation sans effet de bord : meme calcul que tankFire (trajectoire, impact, degats).
+// Sert a l'apercu de tir et au mode Win (l'etat des chars et du terrain est public).
+export function tankSimulate(state, side, move = {}) {
+  const { weapon, angle, power, drive = 0 } = move || {};
+  const config = TANK_WEAPONS[weapon];
+  const foe = opposite(side);
+  if (!config || !state?.tanks?.[side] || !state.tanks[foe]) return null;
+  const me = { ...state.tanks[side], x: rounded(state.tanks[side].x + drive) };
+  const enemy = state.tanks[foe];
+  const { impact, points } = sampleFlight(state.terrain, me, enemy, angle, power, weapon, side);
+  const tanks = { [side]: me, [foe]: enemy };
+  const damage = { host: 0, guest: 0 };
+  let terrain = state.terrain;
+  const blasts = [[impact, config]];
+  if (weapon === 'cluster') {
+    for (const offset of [-4, 4]) blasts.push([{ x: clamp(impact.x + offset, 0, 100), y: impact.y }, CLUSTER_BLAST]);
+  }
+  for (const [point, cfg] of blasts) {
+    const effect = blastEffect(terrain, tanks, point, cfg);
+    terrain = effect.terrain;
+    damage.host += effect.hits.host;
+    damage.guest += effect.hits.guest;
+  }
+  return { impact, points, damage };
 }
 function assertSide(state, side) {
   if (!['host', 'guest'].includes(side)) throw new Error('Joueur invalide.');
@@ -125,7 +160,7 @@ export function tankFire(state, side, move = {}, now = Date.now()) {
   explosion(state, impact, config, hits);
   if (weapon === 'cluster') {
     for (const offset of [-4,4]) explosion(state, {x:clamp(impact.x+offset,0,100),y:impact.y},
-      {damage:8,radius:4,crater:3}, hits);
+      CLUSTER_BLAST, hits);
   }
   state.lastShot = {side,weapon,angle:rounded(angle),power:rounded(power),drive:rounded(drive),
     at:now, impact, points, damage:hits, round:state.round+1, beforeTerrain, beforeTanks};

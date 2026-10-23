@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {tankInitial,tankFire,tankCarve,tankSurface,tankForfeit,tankOfferDraw,tankCancelDraw,tankRespondDraw,TANK_WEAPONS} from './tankEngine.js';
+import {tankInitial,tankFire,tankCarve,tankSurface,tankForfeit,tankOfferDraw,tankCancelDraw,tankRespondDraw,TANK_WEAPONS,tankSimulate} from './tankEngine.js';
 test('terrain deterministe', () => {assert.deepEqual(tankInitial(4).terrain,tankInitial(4).terrain);assert.equal(tankInitial(4).terrain.length,101);});
 test('cratere modifie sol seulement autour impact', () => {let t=tankInitial(2).terrain;let n=tankCarve(t,45,10,6);assert.equal(n[1],t[1]);assert.ok(n[45]>t[45]);});
 test('tir normal change le tour sans supprimer les autres tirs', () => {let s=tankInitial(4);tankFire(s,'host',{weapon:'shell',angle:40,power:70});assert.equal(s.round,1);assert.equal(s.toMove,'guest');assert.ok(s.lastShot.points.length>2);});
@@ -36,4 +36,18 @@ test('missile vertical : monte, retombe avec la gravite et peut rater', () => {
   assert.ok(Math.min(...ys) < ys[0] - 10, 'le missile doit monter');
   assert.ok(s.lastShot.impact.x < 70, 'tir trop faible : retombe avant l adversaire');
   assert.equal(s.lastShot.damage.guest, 0);
+});
+test('tankSimulate donne exactement le resultat de tankFire (sans rien modifier)', () => {
+  const armes = Object.keys(TANK_WEAPONS);
+  for (let seed = 1; seed <= 12; seed++) for (const weapon of armes) for (const [angle, power] of [[40, 60], [62, 85], [80, 100], [25, 45]]) {
+    const a = Math.max(angle, TANK_WEAPONS[weapon].minAngle || 0);
+    const s = tankInitial(seed);
+    const avant = JSON.stringify(s);
+    const sim = tankSimulate(s, 'host', { weapon, angle: a, power, drive: 0 });
+    assert.equal(JSON.stringify(s), avant, 'la simulation ne doit rien modifier');
+    tankFire(s, 'host', { weapon, angle: a, power, drive: 0 });
+    assert.deepEqual(sim.damage, s.lastShot.damage);
+    assert.deepEqual(sim.impact, s.lastShot.impact);
+    assert.deepEqual(sim.points, s.lastShot.points);
+  }
 });
