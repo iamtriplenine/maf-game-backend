@@ -3,7 +3,7 @@
 // versees au gagnant a la fin du match, ou remboursees si le salon est ferme avant la fin.
 import crypto from 'node:crypto';
 import { initialDice, rollDice, diceView, validateDiceSettings } from './diceEngine.js'; // MAF_DICE_BACKEND_V1
-import { assertCanCreateRoom, assertHostAvailable } from './multiRooms.js'; // MAF_MULTIROOM_V1
+import { assertCanCreateRoom, assertHostAvailable, assertCanRequestRoom, assertPlayersAvailable } from './multiRooms.js'; // MAF_MULTIROOM_V1 // MAF_ROOMS_FREE_UNTIL_ACCEPTED_V1
 import { Router } from 'express';
 import { pool } from './db.js';
 import { ensureTable, readToken, requireSession } from './auth.js';
@@ -226,8 +226,9 @@ export async function maintainRooms() {
 
 // Liste des salons : uniquement des identites publiques et aucune donnee sensible.
 const SELECT = `SELECT r.*, h.pseudo AS host_pseudo, g.pseudo AS guest_pseudo,
-  EXISTS (SELECT 1 FROM maf_rooms sibling WHERE sibling.host_id=r.host_id AND sibling.id<>r.id
-    AND sibling.status IN ('pending','ready','playing')) AS host_busy
+  EXISTS (SELECT 1 FROM maf_rooms sibling WHERE sibling.id<>r.id
+    AND (sibling.host_id=r.host_id OR sibling.guest_id=r.host_id)
+    AND sibling.status IN ('ready','playing')) AS host_busy
   FROM maf_rooms r JOIN maf_users h ON h.id=r.host_id
   LEFT JOIN maf_users g ON g.id=r.guest_id`;
 // Message de fonds insuffisants visible par les deux joueurs (pendant 3 minutes).
@@ -333,7 +334,8 @@ roomsRouter.get('/mine/all', requireSession, respond(async (req, res) => {
   const { rows } = await pool.query(`${SELECT}
     WHERE r.status IN ('open','pending','ready','playing') AND (r.host_id=$1 OR r.guest_id=$1)
     ORDER BY CASE r.status WHEN 'playing' THEN 0 WHEN 'ready' THEN 1
-      WHEN 'pending' THEN 2 ELSE 3 END, r.updated_at DESC LIMIT 5`, [req.userId]);
+      WHEN 'pending' THEN 2 ELSE 3 END,
+      CASE WHEN r.guest_id=$1 THEN 0 ELSE 1 END, r.updated_at DESC LIMIT 10`, [req.userId]);
   res.json({ rooms: rows.map((r) => shown(r, req.userId)), max: 5 });
 }));
 
@@ -341,7 +343,8 @@ roomsRouter.get('/mine', requireSession, respond(async (req, res) => {
   await expireRooms(pool);
   const { rows } = await pool.query(`${SELECT}
     WHERE r.status IN ('open','pending','ready','playing') AND (r.host_id=$1 OR r.guest_id=$1)
-    ORDER BY CASE r.status WHEN 'playing' THEN 0 WHEN 'ready' THEN 1 WHEN 'pending' THEN 2 ELSE 3 END, r.updated_at DESC LIMIT 1`, [req.userId]);
+    ORDER BY CASE r.status WHEN 'playing' THEN 0 WHEN 'ready' THEN 1 WHEN 'pending' THEN 2 ELSE 3 END,
+      CASE WHEN r.guest_id=$1 THEN 0 ELSE 1 END, r.updated_at DESC LIMIT 1`, [req.userId]);
   res.json({ room: rows[0] ? shown(rows[0], req.userId) : null });
 }));
 
@@ -408,8 +411,7 @@ roomsRouter.post('/:id/join', requireSession, respond(async (req, res) => {
     if (original.host_id === req.userId) throw fail(400, 'Tu es deja le createur de ce salon.');
     if (original.status !== 'open') throw fail(409, 'Ce salon a deja une demande ou deux joueurs.');
     await assertHostAvailable(client, original.host_id, original.id);
-    if (await activeMembership(client, req.userId))
-      throw fail(409, 'Tu es deja dans un autre salon. Quitte-le avant de rejoindre celui-ci.');
+    await assertCanRequestRoom(client, req.userId, original.id);
     const me = (await client.query('SELECT balance FROM maf_users WHERE id=$1', [req.userId])).rows[0];
     if (!me) throw fail(401, 'Compte introuvable.');
     if (me.balance < original.stake) {
@@ -431,7 +433,7 @@ roomsRouter.post('/:id/accept', requireSession, respond(async (req, res) => {
     const original = await load(client, roomId(req.params.id));
     if (original.host_id !== req.userId) throw fail(403, 'Seul le createur peut accepter.');
     if (original.status !== 'pending') throw fail(409, 'Aucune demande en attente.');
-    await assertHostAvailable(client, original.host_id, original.id);
+    await assertPlayersAvailable(client, original.host_id, original.guest_id, original.id);
     const users = await lockUsers(client, [original.host_id, original.guest_id]);
     const lacks = {
       host: !(users.get(original.host_id)?.balance >= original.stake),
