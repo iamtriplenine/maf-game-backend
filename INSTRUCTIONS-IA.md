@@ -1,123 +1,150 @@
-# INSTRUCTIONS POUR L'IA (a lire en premier, a respecter a chaque reponse)
+# INSTRUCTIONS POUR LES IA - MAF GAME (A LIRE AVANT TOUTE MODIFICATION)
 
-Ce fichier est dans le projet pour que l'utilisateur n'ait plus a expliquer sa
-methode de travail. Une copie identique existe dans `maf-game/` et `maf-backend/`.
-Si tu modifies ce fichier, livre-le dans les DEUX projets.
+Ce document definit la methode de travail exigee par le proprietaire de MAF GAME.
+Il doit rester IDENTIQUE dans les deux depots, a la racine, sous le nom
+`INSTRUCTIONS-IA.md`. Le fichier `AGENTS.md` pointe egalement vers ces regles.
+Si une IA change ces instructions, elle met a jour les deux copies.
 
-## 1. Le projet
+## 1. Depots GitHub et environnement
 
-- `maf-game` : application front (React 19 + Vite + three.js / react-three-fiber).
-- `maf-backend` : serveur Node/Express heberge sur Render, base PostgreSQL Render.
-  Chaque `git push` sur `main` redeploie le backend automatiquement.
-- L'utilisateur travaille sous Windows, avec PowerShell. Il n'est pas oblige de
-  savoir coder : il doit pouvoir tout faire en un clic.
-- Chemins par defaut (a adapter si l'utilisateur en donne d'autres) :
-  - Front : `C:\Users\hp\Documents\999\maf-game`
-  - Back  : `C:\Users\hp\Documents\999\maf-game-backend-1`
-- Langue : reponds toujours en francais, de facon courte et claire.
+Depots de reference (verifier que les liens sont accessibles et actuels) :
 
-## 2. Regle d'or : comment livrer les modifications
+- Frontend (React 19, Vite) : https://github.com/iamtriplenine/maf-game
+- Backend (Node.js / Express, PostgreSQL) : https://github.com/iamtriplenine/maf-game-backend
 
-Tu ne renvoies JAMAIS les fichiers du projet en entier dans le chat, et tu ne
-demandes JAMAIS a l'utilisateur de copier-coller du code a la main dans un fichier.
+Le backend est deployee sur Render. Ne jamais supposer qu'un push ou un
+redeploiement a reussi sans le verifier. Ces URL servent a LIRE la version
+courante ; un depot public ne donne pas automatiquement le droit d'y ecrire.
 
-Pour chaque modification tu livres exactement DEUX choses :
+Utilisateur : Windows / Windows PowerShell 5.1 ; repondre en francais, simplement.
+Dossiers habituels (a adapter si l'utilisateur donne d'autres chemins) :
 
-1. **Un fichier ZIP** (lien de telechargement) qui contient uniquement les
-   fichiers modifies ou nouveaux (pas tout le projet) + les scripts d'installation.
-2. **Un bloc PowerShell** a coller tel quel, qui fait tout en un clic :
-   extraire le zip, appliquer les changements, puis publier.
+- Frontend : `C:\Users\hp\Documents\999\maf-game`
+- Backend  : `C:\Users\hp\Documents\999\maf-game-backend-1`
 
-Pas de longue explication avant : le zip, le bloc, puis 2-3 lignes sur ce qui change.
-Ne demande pas de confirmation, avance directement pour ne pas faire perdre de temps.
+## 2. Regle obligatoire : consulter la version actuelle
 
-## 3. Structure du zip
+AVANT de creer un correctif :
 
-Le zip a UN dossier racine portant le meme nom que le zip (sans `.zip`) :
+1. Consulter le depot GitHub fourni par l'utilisateur et la branche concernee ;
+   lire les fichiers reellement impliques dans la demande et verifier leur
+   version/commit. Consulter les DEUX depots si le front et le back interagissent.
+2. Ne pas se baser uniquement sur un ancien ZIP, une conversation precedente ou
+   une copie locale. Comparer les fichiers si des versions differentes existent.
+3. Si l'acces GitHub est indisponible, le dire explicitement : ne pas pretendre
+   avoir verifie les derniers commits. Demander une source a jour si necessaire,
+   ou livrer un correctif avec verifications qui REFUSE les fichiers incompatibles.
+4. Identifier les autres fonctions partageant les fichiers touches. Ne modifier
+   QUE ce qui a ete demande. Preserver tout travail en cours d'une autre IA.
+5. Ne pas modifier le comportement des jeux, salons, solde, transactions,
+   notifications, administration ou securite si la demande ne les concerne pas.
 
-```
+## 3. Livrable obligatoire : ZIP + commande PowerShell
+
+Pour chaque modification de code, livrer dans la meme reponse :
+
+1. Un lien de telechargement vers un **vrai fichier ZIP cree et verifie**, avec
+   seulement le correctif necessaire et les scripts d'installation.
+2. Un **unique bloc PowerShell complet et pret a coller** depuis Windows, qui
+   extrait le ZIP depuis `Telechargements`, applique, verifie et publie. Ne pas
+   exiger que l'utilisateur ouvre l'editeur de code, copie plusieurs fichiers ou
+   invente des chemins. Le code doit arreter la publication en cas d'erreur.
+3. Une courte explication de ce qui change, de ce qui reste inchange et des
+   verifications effectivement effectuees. Ne jamais inventer des tests reussis.
+
+Ne jamais se contenter de dire « voici du code » ou donner un nom de ZIP qui
+n'existe pas. Si la creation du ZIP est impossible, le dire clairement et
+fournir une alternative honnete. Ne jamais promettre un deploiement non realise.
+
+## 4. Format standard du ZIP
+
+```text
 maf-<nom>-update.zip
- \- maf-<nom>-update\
-     |- Appliquer.ps1          (copie les fichiers, installe si besoin)
-     |- Publier.ps1            (build de controle + git commit/push)
-     |- message.txt            (message de commit, une ligne)
-     \- fichiers\
-         |- frontend\          (meme arborescence que maf-game, fichiers modifies seulement)
-         |- backend\           (meme arborescence que maf-backend, seulement si concerne)
-         \- a-supprimer.txt    (optionnel : une ligne par fichier a supprimer,
-                                ex. `frontend/src/vieux.jsx`)
+  maf-<nom>-update/
+    Appliquer.ps1
+    Publier.ps1
+    message.txt
+    fichiers/
+      frontend/  (fichiers cibles uniquement)
+      backend/   (fichiers cibles uniquement, si necessaire)
 ```
 
-- `<nom>` : court, en minuscules, avec des tirets (ex. `circle`, `profil-menu`).
-- Un fichier modifie est fourni COMPLET dans le zip (il remplace l'ancien),
-  mais n'est pas recopie dans le chat.
-- Les scripts `Appliquer.ps1` et `Publier.ps1` generiques sont dans
-  `maf-game/_ia/`. Reprends-les tels quels dans chaque zip. Si tu ne les as pas,
-  reecris-les en suivant la section 5.
-- Ne cree pas de fichiers `.bak` dans le projet : `Appliquer.ps1` fait deja les
-  sauvegardes (dossier `.maf-sauvegardes`, ignore par git).
+- Adapter `nom` a la modification ; respecter l'arborescence du depot.
+- Ne jamais inclure `node_modules`, `dist`, `.env`, tokens, bases de donnees,
+  dossiers de sauvegarde ou secrets. Ne pas divulguer de code secret d'admin.
+- Pour un fichier partage deja change par une autre IA, privilegier un patch
+  cible avec controle du contexte ; NE PAS l'ecraser avec un ancien fichier.
+- `Appliquer.ps1` cree une sauvegarde hors du code versionne avant remplacement
+  et refuse tout contexte incompatible. Ne jamais effacer silencieusement.
+- Le ZIP peut contenir des scripts additionnels si utiles, mais doit rester
+  autonome : ne pas supposer qu'un dossier `_ia` existe dans le projet.
 
-## 4. Modele du bloc PowerShell (remplace `<nom>`)
+## 5. Bloc PowerShell a donner a l'utilisateur
 
-````powershell
-$zip = Join-Path $env:USERPROFILE "Downloads\maf-<nom>-update.zip"
-$dossier = Join-Path $env:TEMP "maf-<nom>-update"
-$front = "C:\Users\hp\Documents\999\maf-game"
-$back  = "C:\Users\hp\Documents\999\maf-game-backend-1"
+Remplacer `<nom>` par le nom reel du ZIP fourni. Verifier que les scripts et
+l'arborescence du ZIP utilisent exactement les memes noms.
 
-if (Test-Path $dossier) { Remove-Item $dossier -Recurse -Force }
-Expand-Archive -Path $zip -DestinationPath $dossier -Force
+```powershell
+$zip = Join-Path $env:USERPROFILE 'Downloads\maf-<nom>-update.zip'
+$dossier = Join-Path $env:TEMP 'maf-<nom>-update'
+$front = 'C:\Users\hp\Documents\999\maf-game'
+$back = 'C:\Users\hp\Documents\999\maf-game-backend-1'
 
-powershell -NoProfile -ExecutionPolicy Bypass `
-  -File "$dossier\maf-<nom>-update\Appliquer.ps1" `
-  -Frontend $front -Backend $back
-
-if ($LASTEXITCODE -ne 0) {
-  throw "Installation interrompue. Publication annulee."
-}
+if (-not (Test-Path -LiteralPath $zip)) { throw "ZIP introuvable : $zip" }
+if (Test-Path -LiteralPath $dossier) { Remove-Item -LiteralPath $dossier -Recurse -Force }
+Expand-Archive -LiteralPath $zip -DestinationPath $dossier -Force
+$racine = Join-Path $dossier 'maf-<nom>-update'
 
 powershell -NoProfile -ExecutionPolicy Bypass `
-  -File "$dossier\maf-<nom>-update\Publier.ps1" `
-  -Frontend $front -Backend $back
+  -File (Join-Path $racine 'Appliquer.ps1') -Frontend $front -Backend $back
+if ($LASTEXITCODE -ne 0) { throw 'Installation interrompue. Rien ne sera publie.' }
 
-if ($LASTEXITCODE -ne 0) {
-  throw "Publication interrompue : consulte le message affiche."
-}
-````
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File (Join-Path $racine 'Publier.ps1') -Frontend $front -Backend $back
+if ($LASTEXITCODE -ne 0) { throw 'Publication interrompue. Voir les erreurs.' }
+```
 
-Avant le bloc, dis simplement : « Enregistre le zip dans Telechargements, puis
-colle ce bloc dans PowerShell. » (Si le zip ne touche qu'un des deux projets,
-le bloc reste le meme : les scripts ignorent ce qui n'est pas dans le zip.)
+Avant le bloc, dire : « Enregistre le ZIP dans Telechargements, puis colle
+ce bloc entier dans PowerShell. » Ne pas lancer des commandes differentes des
+fichiers inclus dans le ZIP. Windows PowerShell 5.1 : pas de `&&` ou `??` ;
+scripts `.ps1` compatibles et de preference en UTF-8 avec BOM.
 
-## 5. Comportement attendu des scripts
+## 6. Protection obligatoire dans les scripts
 
-**Appliquer.ps1** (parametres `-Frontend`, `-Backend` optionnel)
-- Verifie que les dossiers existent et contiennent `package.json`. Sinon : message
-  rouge clair + `exit 1`.
-- Copie chaque fichier de `fichiers\frontend` vers le front et de `fichiers\backend`
-  vers le back, en creant les dossiers manquants.
-- Avant d'ecraser un fichier different, le sauvegarde dans
-  `<projet>\.maf-sauvegardes\<date-heure>\` et ajoute ce dossier au `.gitignore`.
-- Traite `a-supprimer.txt` en deplacant les fichiers vers la sauvegarde.
-- Lance `npm install` si `package.json` a change.
-- Affiche ce qui a ete fait (`+` nouveau, `~` modifie, `=` identique, `-` supprime).
-- En cas d'erreur : `exit 1` (le bloc PowerShell s'arrete alors, rien n'est publie).
+**Appliquer.ps1** :
 
-**Publier.ps1** (memes parametres)
-- Pour le front modifie : `npm run build` de controle. Si ca echoue, on ne publie pas.
-- Pour chaque projet qui est un depot git et qui a des changements :
-  `git add -A`, `git commit -m "<message.txt>"`, `git push`.
-- Si un projet n'est pas un depot git, ou n'a rien a publier : le dire et continuer.
-- `exit 1` a la moindre erreur git/build.
+- Verifier les dossiers, fichiers et versions attendues avant toute ecriture.
+- Verifier les changements existants pour les fichiers cibles ; en cas de
+  conflit, s'arreter au lieu d'ecraser le travail de l'utilisateur/d'une IA.
+- Si possible, verifier que la branche locale correspond a la version GitHub
+  avant installation (`git fetch`, controle du commit), sans `reset --hard`.
+- Sauvegarder les fichiers touches et permettre un retour en arriere.
+- Modifier uniquement les fichiers necessaires, sans effets sur les autres
+  jeux, le backend ou l'interface non concernee.
+- Echouer clairement (`exit 1`) a la moindre erreur ; ne jamais publier apres
+  une installation incomplete.
 
-Compatibilite : l'utilisateur a Windows PowerShell 5.1. Pas de syntaxe PowerShell 7
-(`&&`, `??`, etc.). Fichiers `.ps1` en UTF-8 avec BOM, textes sans accents.
+**Publier.ps1** :
 
-## 6. Avant de livrer, verifie
+- Executer les tests concernes et `npm run build` pour le frontend quand il est
+  touche ; ne pas annoncer un test reussi s'il n'a pas ete execute.
+- Verifier les changements distants AVANT le push, et refuser une branche qui
+  a diverge ou pris du retard au lieu de forcer le push.
+- **INTERDICTION de `git add -A` ou `git add .`** : ajouter/committer seulement
+  les fichiers explicitement modifies par ce correctif.
+- Ne jamais publier d'autres modifications en cours, de fichiers secrets ou de
+  commits preexistants sans accord de l'utilisateur.
+- Ne jamais utiliser `git push --force` ni supprimer une branche distante.
+- En cas d'echec : expliquer ou l'operation s'est arretee, sans pretendre que
+  la mise en ligne est terminee.
 
-- Les chemins dans le zip correspondent exactement a l'arborescence du projet.
-- Le code modifie compile (`npm run build` cote front) et ne casse pas l'existant.
-- Tu n'as inclus que ce qui change (pas `node_modules`, `dist`, `.env`, sauvegardes).
-- Ne mets jamais de secrets (mots de passe, cles) dans le zip ni dans le chat.
-- Si une modification demande une variable d'environnement ou une action sur
-  Render, dis-le clairement apres le bloc, en une ligne.
+## 7. Avant de repondre
+
+- Le ZIP existe et s'ouvre ; le lien correspond au fichier reellement genere.
+- Tous les chemins du script correspondent aux noms dans le ZIP.
+- Le correctif s'applique a la version inspectee ; il refuse une version
+  incompatible, sans ecraser des fichiers etrangers.
+- Les tests et builds cites ont reellement ete executes, ou sont indiques comme
+  restant a effectuer sur le PC de l'utilisateur.
+- Les changements sont limites a la demande ; les acces prives et secrets ne
+  sont jamais exposes dans l'interface publique ni dans le ZIP.
