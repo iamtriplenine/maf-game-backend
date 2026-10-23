@@ -12,3 +12,28 @@ test('armes disponibles', () => {for(const k of ['shell','heavy','stone','direct
 test('proposition nulle, annulation, reponse', () => {let s=tankInitial();tankOfferDraw(s,'host');assert.throws(()=>tankCancelDraw(s,'guest'));tankCancelDraw(s,'host');tankOfferDraw(s,'host');tankRespondDraw(s,'guest',true);assert.equal(s.draw,true);});
 test('forfait gagne a adversaire', () => {let s=tankInitial();tankForfeit(s,'host');assert.equal(s.winner,'guest');});
 test('terrain prend en charge interpolation', () => {let s=tankInitial();assert.ok(tankSurface(s.terrain,27.6)>0);});
+test('a 100 % de puissance, chaque arme peut depasser l adversaire', () => {
+  for (const [key, w] of Object.entries(TANK_WEAPONS)) {
+    let passe = false;
+    for (let angle = w.minAngle || 1; angle <= 89 && !passe; angle++) {
+      const s = tankInitial(4);
+      tankFire(s, 'host', { weapon: key, angle, power: 100 });
+      if (s.lastShot.impact.x >= 95) passe = true;
+    }
+    assert.ok(passe, key + ' ne depasse pas l adversaire a 100 %');
+  }
+});
+test('missile vertical : angle minimum impose', () => {
+  const s = tankInitial(4);
+  assert.throws(() => tankFire(s, 'host', { weapon: 'sky', angle: 30, power: 80 }), /Angle trop bas/);
+  assert.equal(s.round, 0);
+  assert.equal(s.tanks.host.ammo.sky, 3);
+});
+test('missile vertical : monte, retombe avec la gravite et peut rater', () => {
+  const s = tankInitial(4);
+  tankFire(s, 'host', { weapon: 'sky', angle: 75, power: 40 });
+  const ys = s.lastShot.points.map((p) => p.y);
+  assert.ok(Math.min(...ys) < ys[0] - 10, 'le missile doit monter');
+  assert.ok(s.lastShot.impact.x < 70, 'tir trop faible : retombe avant l adversaire');
+  assert.equal(s.lastShot.damage.guest, 0);
+});

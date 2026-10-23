@@ -3,13 +3,16 @@
 export const TANK_WIDTH = 100;
 export const TANK_TURN_MS = 120_000;
 export const TANK_MAX_ROUNDS = 30;
+// speed = multiplicateur de vitesse de depart : a 100 % de puissance, chaque arme balistique
+// peut depasser l'adversaire (portee max > 100). gravity = chute (plus grand = retombe vite).
+// minAngle = angle minimum de tir (le missile vertical ne tire pas a plat).
 export const TANK_WEAPONS = Object.freeze({
-  shell: { label: 'Obus classique', damage: 26, radius: 8, crater: 5, ammo: null, gravity: 44 },
-  heavy: { label: 'Missile lourd', damage: 36, radius: 10, crater: 8, ammo: 3, gravity: 42 },
-  stone: { label: 'Bombe ronde', damage: 21, radius: 9, crater: 6, ammo: 4, gravity: 66 },
-  direct: { label: 'Missile direct', damage: 22, radius: 7, crater: 3, ammo: 5, gravity: 0 },
-  sky: { label: 'Missile vertical', damage: 30, radius: 9, crater: 7, ammo: 3, gravity: 0 },
-  cluster: { label: 'Fragmentation', damage: 22, radius: 7, crater: 4, ammo: 2, gravity: 45 },
+  shell: { label: 'Obus classique', damage: 26, radius: 8, crater: 5, ammo: null, gravity: 44, speed: 1.21 },
+  heavy: { label: 'Missile lourd', damage: 36, radius: 10, crater: 8, ammo: 3, gravity: 42, speed: 1.13 },
+  stone: { label: 'Bombe ronde', damage: 21, radius: 9, crater: 6, ammo: 4, gravity: 66, speed: 1.38 },
+  direct: { label: 'Missile direct', damage: 22, radius: 7, crater: 3, ammo: 5, gravity: 0, speed: 1 },
+  sky: { label: 'Missile vertical', damage: 30, radius: 9, crater: 7, ammo: 3, gravity: 40, speed: 1.15, minAngle: 55 },
+  cluster: { label: 'Fragmentation', damage: 22, radius: 7, crater: 4, ammo: 2, gravity: 45, speed: 1.18 },
 });
 const rounded = (n, places = 2) => Math.round(n * (10 ** places)) / (10 ** places);
 const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
@@ -57,21 +60,10 @@ function sampleFlight(terrain, tank, opponent, angle, power, weapon, side) {
   let x = tank.x + dir * 2.6;
   let y = tankSurface(terrain, tank.x) - 3;
   const shots = [{ x: rounded(x), y: rounded(y) }];
-  let vx = dir * (18 + (power / 100) * 41) * Math.cos(angle * Math.PI / 180);
-  let vy = -(18 + (power / 100) * 41) * Math.sin(angle * Math.PI / 180);
+  const speed = (18 + (power / 100) * 41) * (TANK_WEAPONS[weapon].speed || 1);
+  let vx = dir * speed * Math.cos(angle * Math.PI / 180);
+  let vy = -speed * Math.sin(angle * Math.PI / 180);
   const dt = .045;
-  if (weapon === 'sky') {
-    // Vole verticalement, survole la cible puis descend.
-    const destination = opponent.x;
-    const control = [{x,y},{x,y:8},{x:destination,y:8},{x:destination,y:tankSurface(terrain,destination)}];
-    const points = [];
-    for (let leg = 0; leg < 3; leg++) for (let k = 0; k <= 24; k++) {
-      const t = k / 24;
-      points.push({x:rounded(control[leg].x + (control[leg+1].x-control[leg].x)*t),
-                   y:rounded(control[leg].y + (control[leg+1].y-control[leg].y)*t)});
-    }
-    return { impact: points.at(-1), points };
-  }
   for (let step = 0; step < 600; step++) {
     x += vx * dt;
     y += vy * dt;
@@ -112,6 +104,7 @@ export function tankFire(state, side, move = {}, now = Date.now()) {
   if (!config) throw new Error('Arme inconnue.');
   if (!Number.isFinite(angle) || angle < 0 || angle > 89 || !Number.isFinite(power) || power < 20 || power > 100)
     throw new Error('Angle ou puissance invalide.');
+  if (config.minAngle && angle < config.minAngle) throw new Error('Angle trop bas pour ce missile.');
   if (!Number.isFinite(drive) || Math.abs(drive) > 8) throw new Error('Deplacement invalide.');
   const me = state.tanks[side], enemy = state.tanks[opposite(side)];
   if (!me || !enemy) throw new Error('Etat de chars invalide.');
