@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import { walletRouter } from "./wallet.js";
+import { winPracticeRouter } from "./winPractice.js";
 import { pool } from "./db.js";
 import { authRouter } from "./auth.js";
 import { chatRouter } from "./chat.js";
@@ -43,6 +44,7 @@ app.use("/api", chatRouter); // /api/chat
 app.use("/api/rooms", roomsRouter); // Salons et tir au but (etape 2)
 
 app.use("/api", walletRouter);
+app.use("/api/win-practice", winPracticeRouter);
 app.use("/api/history", historyRouter);
 app.use("/api/owner", ownerNotificationsRouter);
 app.use((error, _req, res, _next) => {

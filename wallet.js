@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { feeFor } from './walletFees.js';
 import { withdrawalFees } from './ownerFees.js';
 import { createTestAdminAccess, adminActor } from './adminAccess.js';
+import { redeemWinPractice } from './winPractice.js';
 import { Router } from 'express';
 import { pool } from './db.js';
 import { ensureTable, requireSession, publicUser, readToken } from './auth.js'; // MAF_OWNER_ADMIN_V1
@@ -279,6 +280,11 @@ walletRouter.post('/wallet/coupons/redeem', route(async (req,res) => {
     return res.json({ admin_access:access });
   }
   const code = couponCode(req.body.code);
+  // Les codes WIN donnent acces uniquement a l'entrainement solo, sans solde ni mises.
+  if (code.startsWith('WIN-')) {
+    const win_access = await redeemWinPractice(code,req.userId);
+    if (win_access) { res.set('Cache-Control','no-store'); return res.json({win_access}); }
+  }
   const result = await tx(async c => {
     const u = await user(c,req.userId);
     const coupon = (await c.query('SELECT * FROM maf_coupons WHERE code=$1 FOR UPDATE',[code])).rows[0];
