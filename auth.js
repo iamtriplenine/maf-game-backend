@@ -198,7 +198,7 @@ export function requireSession(req, res, next) {
 
 // Le catalogue est actuellement gratuit. Validation cote serveur pour eviter
 // d'enregistrer un chemin de modele arbitraire.
-const ALLOWED_SKINS = new Set(["loki", "bailarina", "samba", "messi", "mutant-run", "mutant-attack"]);
+const ALLOWED_SKINS = new Set(["loki", "bailarina", "samba", "messi", "mutant-swipe", "mutant-run", "mutant-attack"]);
 authRouter.patch("/skin", requireSession, async (req, res) => {
   const skinId = req.body?.skin_id;
   if (typeof skinId !== "string" || !ALLOWED_SKINS.has(skinId)) {
