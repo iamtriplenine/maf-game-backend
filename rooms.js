@@ -2,6 +2,7 @@
 // Mises REELLES : debitees quand le createur accepte l'adversaire, retenues sur le salon (escrow),
 // versees au gagnant a la fin du match, ou remboursees si le salon est ferme avant la fin.
 import crypto from 'node:crypto';
+import { getTankRunRuntime, tankRunPress, dropTankRunRuntime } from './tankRunRealtime.js'; // MAF_TANKRUN_ROOM_V1
 import { initialDice, rollDice, diceView, validateDiceSettings } from './diceEngine.js'; // MAF_DICE_BACKEND_V1
 import { assertCanCreateRoom, assertHostAvailable, assertCanRequestRoom, assertPlayersAvailable } from './multiRooms.js'; // MAF_MULTIROOM_V1 // MAF_ROOMS_FREE_UNTIL_ACCEPTED_V1
 import { Router } from 'express';
@@ -64,6 +65,7 @@ export function ensureRooms() {
       // Mise a niveau automatique des tables creees a l'etape 1.
       await client.query(`
         ALTER TABLE maf_rooms ADD COLUMN IF NOT EXISTS match_state jsonb;
+        ALTER TABLE maf_rooms ADD COLUMN IF NOT EXISTS tankrun_setup jsonb NOT NULL DEFAULT '{}'::jsonb;
         ALTER TABLE maf_rooms ADD COLUMN IF NOT EXISTS dice_count smallint;
         ALTER TABLE maf_rooms ADD COLUMN IF NOT EXISTS dice_mode text;
         ALTER TABLE maf_rooms ADD COLUMN IF NOT EXISTS departures jsonb NOT NULL DEFAULT '{}'::jsonb;
@@ -73,11 +75,11 @@ export function ensureRooms() {
         ALTER TABLE maf_rooms ADD COLUMN IF NOT EXISTS funds_alert jsonb;
         ALTER TABLE maf_rooms DROP CONSTRAINT IF EXISTS maf_rooms_game_check;
         ALTER TABLE maf_rooms ADD CONSTRAINT maf_rooms_game_check
-          CHECK(game IN ('penalty', 'checkers', 'tank', 'dice'));
+          CHECK(game IN ('penalty', 'checkers', 'tank', 'dice', 'tankrun'));
         ALTER TABLE maf_rooms ALTER COLUMN shots DROP NOT NULL;
         ALTER TABLE maf_rooms DROP CONSTRAINT IF EXISTS maf_rooms_shots_check;
         ALTER TABLE maf_rooms ADD CONSTRAINT maf_rooms_shots_check
-          CHECK((game='penalty' AND shots IN (3,5,10)) OR (game='dice' AND shots IN (1,3,5,10)) OR (game IN ('checkers','tank') AND shots IS NULL));
+          CHECK((game='penalty' AND shots IN (3,5,10)) OR (game='dice' AND shots IN (1,3,5,10)) OR (game IN ('checkers','tank','tankrun') AND shots IS NULL));
         ALTER TABLE maf_rooms DROP CONSTRAINT IF EXISTS maf_rooms_dice_count_check;
         ALTER TABLE maf_rooms ADD CONSTRAINT maf_rooms_dice_count_check CHECK ((game='dice' AND dice_count IN (1,2)) OR (game<>'dice' AND dice_count IS NULL));
         ALTER TABLE maf_rooms DROP CONSTRAINT IF EXISTS maf_rooms_dice_mode_check;
@@ -270,6 +272,7 @@ const shown = (row, viewerId = null) => ({
   shots: row.shots, stake: row.stake, status: row.status,
   dice_count: row.dice_count || null, dice_mode: row.dice_mode || null,
   host_busy: Boolean(row.host_busy),
+  tankrun_setup: row.game === 'tankrun' && [row.host_id,row.guest_id].includes(viewerId) ? row.tankrun_setup : undefined,
   host: { id: row.host_id, pseudo: row.host_pseudo },
   guest: viewerId && [row.host_id, row.guest_id].includes(viewerId) && row.guest_id
     ? { id: row.guest_id, pseudo: row.guest_pseudo } : null,
@@ -304,7 +307,7 @@ async function activeMembership(client, uid) {
 
 roomsRouter.use((req, res, next) => {
   if (!pool) return res.status(503).json({ error: 'Base de donnees non configuree.' });
-  maintainRooms().then(() => next(), next);
+  (req.path.includes('/match/tankrun/') ? ensureRooms() : maintainRooms()).then(() => next(), next);
 });
 roomsRouter.use((_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 
@@ -398,9 +401,9 @@ roomsRouter.get('/:id', respond(async (req, res) => {
 
 roomsRouter.post('/', requireSession, respond(async (req, res) => {
   const { game, shots, stake, diceCount, diceMode } = req.body || {};
-  if (!['penalty', 'checkers', 'tank', 'dice'].includes(game)) throw fail(400, 'Jeu indisponible.');
+  if (!['penalty', 'checkers', 'tank', 'dice', 'tankrun'].includes(game)) throw fail(400, 'Jeu indisponible.');
   if (game === 'penalty' && !allowedShots.has(shots)) throw fail(400, 'Choisis 3, 5 ou 10 tirs par joueur.');
-  if (['checkers','tank'].includes(game) && shots != null) throw fail(400, 'Ce jeu ne demande pas de nombre de tirs.');
+  if (['checkers','tank','tankrun'].includes(game) && shots != null) throw fail(400, 'Ce jeu ne demande pas de nombre de tirs.');
   if (game === 'dice') {
     try { validateDiceSettings(diceCount, shots, diceMode); }
     catch (err) { throw fail(400, err.message); }
@@ -535,6 +538,7 @@ async function visibleMatch(r, uid) {
     (viewer === 'host' ? r.host_pseudo : r.guest_pseudo) === '999';
   const winAvailable = r.status === 'playing' && ['penalty','tank'].includes(r.game) &&
     (ownerWin || await winAccessForRoom(uid,r.game,r.id));
+  if (r.game === 'tankrun') return { status:r.status, match:{...state, viewer, serverNow:Date.now()} };
   if (r.game === 'dice') return { status:r.status, match:{ ...diceView(state, viewer),
     opponentReturnDeadline:r.departures?.[other(viewer)] ?? null,
     returnDeadline:r.departures?.[viewer] ?? null, serverNow:Date.now() } };
@@ -609,13 +613,72 @@ for (const action of ['exit', 'resume']) {
   }));
 }
 
+// MAF_TANKRUN_ROOM_V1: persistance de secours si Render redemarre pendant un duel.
+const saveTankRunCheckpoint=(id,snapshot)=>pool.query(
+  "UPDATE maf_rooms SET match_state=jsonb_set(match_state, '{runtime}', $2::jsonb, true) WHERE id=$1 AND status='playing'",
+  [id,JSON.stringify(snapshot)]);
+// MAF_TANKRUN_ROOM_V1: chaque choix est personnel, terrain resolu par le serveur.
+roomsRouter.post('/:id/match/tankrun/prepare',requireSession,respond(async(req,res)=>{
+ const {arena,skin}=req.body||{};
+ if(!['original','desert','usine'].includes(arena)||!['origine','spectre','titan'].includes(skin)) throw fail(400,'Char ou terrain invalide.');
+ const room=await transaction(async(client)=>{
+  const r=await load(client,roomId(req.params.id));const viewer=side(r,req.userId);
+  if(r.game!=='tankrun'||r.status!=='ready'||!viewer) throw fail(409,'Preparation indisponible.');
+  const setup={...(r.tankrun_setup||{}),[viewer]:{arena,skin}};
+  await client.query('UPDATE maf_rooms SET tankrun_setup=$2::jsonb, updated_at=now() WHERE id=$1',[r.id,JSON.stringify(setup)]);
+  return load(client,r.id);
+ });
+ res.json({room:shown(room,req.userId),...visibleMatch(room,req.userId)});
+}));
+// Lecture snapshot: calcule et publie UNIQUEMENT l'etat du serveur (pas de resultat client).
+roomsRouter.get('/:id/match/tankrun/snapshot',requireSession,respond(async(req,res)=>{
+ const r=await load(pool,roomId(req.params.id)); const viewer=side(r,req.userId);
+ if(r.game!=='tankrun'||!viewer||!['playing','finished'].includes(r.status))throw fail(403,'Match indisponible.');
+ if(r.status==='finished')return res.json({finished:true,winner:r.match_state?.winner,viewer});
+ const runtime=getTankRunRuntime(r, async(roomId,winner)=>{
+  await transaction(async(client)=>{
+   const latest=await load(client,roomId);
+   if(latest.status!=='playing'||latest.game!=='tankrun') return;
+   const state={...latest.match_state,finished:true,winner:winner<0?null:winner===0?'host':'guest',draw:winner<0};
+   await client.query('UPDATE maf_rooms SET status=$2,match_state=$3::jsonb,updated_at=now() WHERE id=$1',[roomId,'finished',JSON.stringify(state)]);
+   if(state.draw)await refundRoom(client,latest);else await settleRoom(client,latest,state.winner);
+  }); dropTankRunRuntime(roomId);
+ },saveTankRunCheckpoint);
+ res.json({viewer,serverNow:Date.now(),...runtime.snapshot()});
+}));
+roomsRouter.post('/:id/match/tankrun/input',requireSession,respond(async(req,res)=>{
+ const r=await load(pool,roomId(req.params.id));const viewer=side(r,req.userId);
+ if(r.game!=='tankrun'||r.status!=='playing'||!viewer)throw fail(403,'Match non autorise.');
+ const down=req.body?.down, ammo=req.body?.ammo;const seq=req.body?.seq,epoch=req.body?.epoch;
+ if(typeof down!=='boolean'||!Number.isSafeInteger(seq)||seq<0||seq>100000000||typeof epoch!=='string'||epoch.length<8||epoch.length>100 || (ammo!=null&&!['standard','rapide','lourd','explosif','ricochet'].includes(ammo)))throw fail(400,'Commande invalide.');
+ const runtime=getTankRunRuntime(r,async(roomId,winner)=>{
+  await transaction(async(client)=>{
+   const latest=await load(client,roomId);if(latest.status!=='playing')return;
+   const state={...latest.match_state,finished:true,winner:winner<0?null:winner===0?'host':'guest',draw:winner<0};
+   await client.query('UPDATE maf_rooms SET status=$2,match_state=$3::jsonb,updated_at=now() WHERE id=$1',[roomId,'finished',JSON.stringify(state)]);
+   if(state.draw)await refundRoom(client,latest);else await settleRoom(client,latest,state.winner);
+  });dropTankRunRuntime(roomId);
+ },saveTankRunCheckpoint);
+ tankRunPress(runtime,viewer==='host'?0:1,down,ammo,seq,epoch);
+ res.json({ok:true});
+}));
+
 roomsRouter.post('/:id/match/start', requireSession, respond(async (req, res) => {
   const room = await transaction(async (client) => {
     const r = await load(client, roomId(req.params.id));
     if (r.host_id !== req.userId) throw fail(403, 'Seul le createur lance le match.');
     if (r.status !== 'ready') throw fail(409, 'Le match ne peut pas etre lance.');
+    let tankrunStart = null;
+    if (r.game === 'tankrun') {
+      const setup = r.tankrun_setup || {};
+      if (!setup.host || !setup.guest) throw fail(409, 'Les deux joueurs doivent choisir leur char et leur terrain.');
+      const choices = [setup.host.arena, setup.guest.arena];
+      const terrain = choices[0] === choices[1] ? choices[0] : choices[crypto.randomInt(0,2)];
+      tankrunStart = { type:'tankrun', arena:terrain, skins:[setup.host.skin,setup.guest.skin],
+        startedAt:Date.now(), finished:false, winner:null };
+    }
     await client.query(`UPDATE maf_rooms SET status='playing', match_state=$2::jsonb,updated_at=now()
-      WHERE id=$1`, [r.id, JSON.stringify(r.game === 'tank' ? tankInitial(Number(r.id) * 9973, Date.now()) : r.game === 'checkers' ? { ...blankCheckers(), lastMoveAt: Date.now() } : r.game === 'dice' ? initialDice(r.dice_count, r.shots, r.dice_mode) : blankMatch(r.shots))]);
+      WHERE id=$1`, [r.id, JSON.stringify(r.game === 'tankrun' ? tankrunStart : r.game === 'tank' ? tankInitial(Number(r.id) * 9973, Date.now()) : r.game === 'checkers' ? { ...blankCheckers(), lastMoveAt: Date.now() } : r.game === 'dice' ? initialDice(r.dice_count, r.shots, r.dice_mode) : blankMatch(r.shots))]);
     return load(client, r.id);
   });
   res.json({ room: shown(room, req.userId), ...await visibleMatch(room, req.userId) });
@@ -674,7 +737,8 @@ roomsRouter.post('/:id/match/forfeit', requireSession, respond(async (req, res) 
     if (!viewer) throw fail(403, 'Tu ne participes pas a ce match.');
     if (r.status !== 'playing' || !r.match_state) throw fail(409, 'Aucun match a abandonner.');
     const state = r.match_state;
-    if (r.game === 'tank') tankForfeit(state, viewer);
+    if (r.game === 'tankrun') { state.finished=true; state.winner=other(viewer); state.forfeit=viewer; dropTankRunRuntime(r.id); }
+    else if (r.game === 'tank') tankForfeit(state, viewer);
     else if (r.game === 'checkers') forfeitCheckers(state, viewer);
     else if (r.game === 'dice') { state.winner = other(viewer); state.draw = false; state.finished = true; state.forfeit = viewer; state.pending = {host:null,guest:null}; }
     else {
