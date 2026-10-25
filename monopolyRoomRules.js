@@ -8,11 +8,12 @@ export function validateSetup(maxPlayers, stake) {
   if (!Number.isSafeInteger(stake) || stake < MIN_STAKE || stake > MAX_STAKE)
     throw new Error('Mise par joueur entre 100 et 1 000 000 F CFA.');
 }
-export function proposeStart(room, memberIds, count, hostId) {
+export function proposeStart(room, memberIds, count, initiatorId) {
   if (room.status !== 'waiting') throw new Error('Une proposition est deja en cours.');
+  if (!memberIds.includes(initiatorId)) throw new Error('Seul un participant peut proposer le depart.');
   if (!Number.isInteger(count) || count < MIN_PLAYERS || count !== memberIds.length || count > room.max_players)
     throw new Error('Tous les joueurs presents doivent participer (2 a 4).');
-  return { count, votes: { [hostId]: true }, createdAt: Date.now() };
+  return { count, proposedBy: initiatorId, votes: { [initiatorId]: true }, createdAt: Date.now() };
 }
 export function voteStart(proposal, memberIds, userId, accept) {
   if (!proposal || !memberIds.includes(userId) || typeof accept !== 'boolean') throw new Error('Vote invalide.');

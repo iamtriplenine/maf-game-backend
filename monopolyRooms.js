@@ -207,7 +207,7 @@ monopolyRoomsRouter.post('/:id/leave',requireSession,handler(async(req,res)=>{
 monopolyRoomsRouter.post('/:id/propose',requireSession,handler(async(req,res)=>{
   const info=await transaction(async c=>{
     const i=await load(c,parseId(req.params.id));
-    if(i.room.host_id!==req.userId)throw fail(403,'Seul le createur peut proposer le depart.');
+    participant(i.members,req.userId);
     let proposal;try{proposal=proposeStart(i.room,i.members.map(m=>m.id),req.body?.count,req.userId);}catch(e){throw fail(409,e.message);}
     await c.query(`UPDATE maf_monopoly_rooms SET status='proposed',proposal=$2::jsonb,updated_at=now() WHERE id=$1`,[i.room.id,JSON.stringify(proposal)]);
     return load(c,i.room.id);

@@ -7,6 +7,15 @@ assert.throws(()=>validateSetup(4,99));
 const ids=[4,7,9],room={status:'waiting',max_players:4};
 let p=proposeStart(room,ids,3,4);
 assert.deepEqual(p.votes,{'4':true});
+assert.equal(p.proposedBy,4);
+// Un invite peut proposer : son accord est alors enregistre et chacun doit voter.
+let guestProposal=proposeStart(room,ids,3,7);
+assert.deepEqual(guestProposal.votes,{'7':true});
+assert.equal(guestProposal.proposedBy,7);
+assert.equal(voteStart(guestProposal,ids,4,true).unanimous,false);
+guestProposal=voteStart(guestProposal,ids,4,true).proposal;
+assert.equal(voteStart(guestProposal,ids,9,true).unanimous,true);
+assert.throws(()=>proposeStart(room,ids,3,18),/participant/);
 assert.equal(voteStart(p,ids,7,true).unanimous,false);
 p=voteStart(p,ids,7,true).proposal;
 assert.equal(voteStart(p,ids,9,true).unanimous,true);
