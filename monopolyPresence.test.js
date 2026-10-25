@@ -30,9 +30,26 @@ assert.equal(result.game.phase,'over');assert.equal(result.game.winner,1);
 let game3=initPresence(createGame({names:['Ali','Bintou']}),[5,9],time);
 result=expirePresence(game3,[{id:5},{id:9}],time+HEARTBEAT_GRACE_MS+1);
 assert.equal(result.game.presence.away['5'],time+HEARTBEAT_GRACE_MS);
+// MAF_MONOPOLY_ELIM_V1 : si les deux joueurs sont absents, le premier parti perd (plus d'annulation).
 let allGone=initPresence(createGame({names:['A','B']}),[5,9],time);
 setPresence(allGone,[{id:5},{id:9}],5,'away',time+50_000);
 setPresence(allGone,[{id:5},{id:9}],9,'away',time+51_000);
-let cancelled=expirePresence(allGone,[{id:5},{id:9}],time+50_000+RECONNECT_MS);
-assert.equal(cancelled.game.phase,'over');assert.equal(cancelled.game.winner,-1);
+let firstLeaves=expirePresence(allGone,[{id:5},{id:9}],time+50_000+RECONNECT_MS);
+assert.equal(firstLeaves.game.phase,'over');assert.equal(firstLeaves.game.winner,1);
+assert.equal(firstLeaves.game.players[0].bankrupt,true);assert.equal(firstLeaves.game.players[1].bankrupt,false);
+// L'adversaire dont l'ecran dort depuis 30 s ne fait plus annuler la partie.
+let sleepy=initPresence(createGame({names:['A','B']}),[5,9],time);
+setPresence(sleepy,[{id:5},{id:9}],5,'away',time);
+setPresence(sleepy,[{id:5},{id:9}],9,'here',time+100_000);
+let sleepyEnd=expirePresence(sleepy,[{id:5},{id:9}],time+RECONNECT_MS+30_000);
+assert.equal(sleepyEnd.game.winner,1);assert.equal(sleepyEnd.game.players[0].bankrupt,true);
+// 3 joueurs absents : elimination dans l'ordre de depart, pas dans l'ordre des sieges.
+let three=initPresence(createGame({names:['A','B','C']}),[5,9,11],time);
+three.current=1;three.phase='roll';
+setPresence(three,[{id:5},{id:9},{id:11}],11,'away',time+1_000);
+setPresence(three,[{id:5},{id:9},{id:11}],5,'away',time+2_000);
+setPresence(three,[{id:5},{id:9},{id:11}],9,'away',time+3_000);
+let ordered=expirePresence(three,[{id:5},{id:9},{id:11}],time+3_000+RECONNECT_MS);
+assert.equal(ordered.game.phase,'over');assert.equal(ordered.game.winner,1);
+assert.equal(ordered.game.players[2].bankrupt,true);assert.equal(ordered.game.players[0].bankrupt,true);
 console.log('OK - absences 2 min, retour, expiration, absence collective et detection deconnexion.');
