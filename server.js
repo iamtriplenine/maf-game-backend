@@ -7,6 +7,7 @@ import { authRouter } from "./auth.js";
 import { chatRouter } from "./chat.js";
 import { roomsRouter, maintainRooms } from "./rooms.js";
 import { monopolyRoomsRouter, maintainMonopolyRooms } from "./monopolyRooms.js";
+import { monopolyVoicesRouter, ensureMonopolyVoices } from "./monopolyVoices.js";
 import { historyRouter } from "./history.js";
 import { ownerNotificationsRouter } from "./ownerNotifications.js"; // MAF_OWNER_ALERTS_V1
 
@@ -45,6 +46,7 @@ app.use("/api", authRouter); // /api/register, /api/login, /api/me
 app.use("/api", chatRouter); // /api/chat
 
 app.use("/api/monopoly/rooms", monopolyRoomsRouter);
+app.use("/api/monopoly/voices", monopolyVoicesRouter);
 app.use("/api/rooms", roomsRouter); // Salons et tir au but (etape 2)
 
 app.use("/api", walletRouter);
@@ -68,3 +70,6 @@ void maintainRooms().catch(error => console.error("room maintenance:", error.mes
 
 // En attente : fermer les salons expires ; en partie : rembourser les mises si 24 h sans action.
 setInterval(() => { void maintainMonopolyRooms().catch(error => console.error("monopoly maintenance:", error.message)); }, 2_000).unref();
+
+// Preparer les vocaux prives et leur suppression automatique a la fin d'un match.
+void ensureMonopolyVoices().catch(error => console.error("monopoly voices setup:", error.message));

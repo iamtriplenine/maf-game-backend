@@ -1,0 +1,17 @@
+import assert from 'node:assert/strict';
+import { VOICE_LIMIT, VOICE_MAX_MS, VOICE_MAX_BYTES, parseVoiceDuration, sniffVoiceMime, pruneOldestIds } from './monopolyVoiceRules.js';
+assert.equal(VOICE_LIMIT, 10);
+assert.equal(VOICE_MAX_MS, 20000);
+assert.equal(VOICE_MAX_BYTES, 614400);
+assert.equal(parseVoiceDuration(600),600);
+assert.equal(parseVoiceDuration(20000),20000);
+assert.equal(parseVoiceDuration(20001),null);
+assert.equal(parseVoiceDuration(100),null);
+assert.equal(parseVoiceDuration('not-a-number'),null);
+assert.deepEqual(pruneOldestIds(Array.from({length:12},(_,i)=>i+1)),[2,1]);
+assert.deepEqual(pruneOldestIds([2,9,1]),[]);
+assert.equal(sniffVoiceMime(Buffer.from([0x1a,0x45,0xdf,0xa3,...new Array(12).fill(0)])), 'audio/webm');
+assert.equal(sniffVoiceMime(Buffer.from('0000ftyp0000')), 'audio/mp4');
+assert.equal(sniffVoiceMime(Buffer.from('OggS00000000')), 'audio/ogg');
+assert.equal(sniffVoiceMime(Buffer.alloc(20)), null);
+console.log('TEST VOCAUX OK : 10 max, 20 s max, controles audio et retention.');
