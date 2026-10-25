@@ -6,10 +6,13 @@ import { pool } from "./db.js";
 import { authRouter } from "./auth.js";
 import { chatRouter } from "./chat.js";
 import { roomsRouter, maintainRooms } from "./rooms.js";
+import { monopolyRoomsRouter, maintainMonopolyRooms } from "./monopolyRooms.js";
 import { historyRouter } from "./history.js";
 import { ownerNotificationsRouter } from "./ownerNotifications.js"; // MAF_OWNER_ALERTS_V1
 
 const app = express();
+// Derriere Render : l'adresse du visiteur vient du proxy (non falsifiable), pas d'un en-tete envoye par le client.
+app.set("trust proxy", 1);
 app.use(express.json({ limit: "3mb" }));
 
 // Adresses du site autorisees a appeler ce serveur (separees par des virgules).
@@ -41,6 +44,7 @@ app.use("/api", authRouter); // /api/register, /api/login, /api/me
 
 app.use("/api", chatRouter); // /api/chat
 
+app.use("/api/monopoly/rooms", monopolyRoomsRouter);
 app.use("/api/rooms", roomsRouter); // Salons et tir au but (etape 2)
 
 app.use("/api", walletRouter);
@@ -61,3 +65,6 @@ app.listen(port, () => {
 // Also settle timeouts when both players have left the screen.
 setInterval(() => { void maintainRooms().catch(error => console.error("room maintenance:", error.message)); }, 1000).unref();
 void maintainRooms().catch(error => console.error("room maintenance:", error.message));
+
+// En attente : fermer les salons expires ; en partie : rembourser les mises si 24 h sans action.
+setInterval(() => { void maintainMonopolyRooms().catch(error => console.error("monopoly maintenance:", error.message)); }, 60_000).unref();
