@@ -15,4 +15,7 @@ normalizeTurnClock(r.game,t+ROLL_MS+10_000);assert.equal(r.game.turnClock.dueAt,
 assert.equal(tickTurnClock(r.game,{now:due+1000}).auto,undefined);
 let ended=endTurn(r.game);normalizeTurnClock(ended,due);
 assert.equal(ended.current,1);assert.equal(ended.turnClock.dueAt,due+ROLL_MS);
-console.log('OK - delai serveur 50s lancer, tour conserve.');
+const expired=tickTurnClock(r.game,{now:due,autoEnd:true});
+assert.equal(expired.auto,'end');assert.equal(expired.game.current,1);
+assert.equal(expired.game.phase,'roll');assert.equal(expired.game.turnClock.dueAt,due+ROLL_MS);
+console.log('OK - delais serveur 50s lancer et 60s fin, tour avance automatiquement.');

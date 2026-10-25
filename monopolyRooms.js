@@ -103,7 +103,7 @@ async function advancePresence(c, info) {
   const initialized = !info.room.match_state.presence;
   if (initialized) initPresence(info.room.match_state, info.members.map(m=>m.id));
   const result = expirePresence(info.room.match_state, info.members);
-  const clock = tickTurnClock(result.game,{rng:rand});
+  const clock = tickTurnClock(result.game,{rng:rand,autoEnd:true});
   if (!result.changed && !clock.changed && !initialized) return info;
   await c.query(`UPDATE maf_monopoly_rooms SET match_state=$2::jsonb,updated_at=now() WHERE id=$1`,
     [info.room.id, JSON.stringify(clock.game)]);
