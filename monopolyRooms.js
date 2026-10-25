@@ -6,6 +6,7 @@ import { ensureTable, requireSession } from './auth.js';
 import { ensureWallet } from './wallet.js';
 import { validateSetup, proposeStart, voteStart } from './monopolyRoomRules.js';
 import { createGame, rollDice, buy, build, sell, endTurn, giveUp, canBuy, buildOptions, sellOptions } from './engine.js';
+import { initPresence, setPresence, expirePresence } from './monopolyPresence.js';
 
 export const monopolyRoomsRouter = Router();
 const fail = (status, message) => Object.assign(new Error(message), { status });
@@ -81,7 +82,7 @@ async function start(c,room,members) {
   const missing=balances.find(x=>x.balance<room.stake);
   if(missing) throw fail(402,`Le joueur #${missing.id} n'a pas la mise necessaire. Aucun compte n'a ete debite.`);
   await c.query('UPDATE maf_users SET balance=balance-$2 WHERE id=ANY($1::int[])',[ids,room.stake]);
-  const game=createGame({names:members.map(p=>p.name),dice:2,rng:rand});
+  const game=initPresence(createGame({names:members.map(p=>p.name),dice:2,rng:rand}),ids);
   const escrow=members.length*room.stake;
   await c.query(`UPDATE maf_monopoly_rooms SET status='playing',proposal=NULL,
     match_state=$2::jsonb,escrow=$3,updated_at=now() WHERE id=$1`,[room.id,JSON.stringify(game),escrow]);
@@ -96,7 +97,21 @@ async function settle(c,room,members,game){
     winner_id=$3,settled_at=now(),updated_at=now() WHERE id=$1`,[room.id,winner!=null?room.escrow:0,winner]);
   await audit(c,winner!=null?'monopoly_payout':'monopoly_refund',{roomId:Number(room.id),winner,stake:room.stake,pot:room.escrow});
 }
+async function advancePresence(c, info) {
+  if (info.room.status !== 'playing' || !info.room.match_state) return info;
+  const initialized = !info.room.match_state.presence;
+  if (initialized) initPresence(info.room.match_state, info.members.map(m=>m.id));
+  const result = expirePresence(info.room.match_state, info.members);
+  if (!result.changed && !initialized) return info;
+  await c.query(`UPDATE maf_monopoly_rooms SET match_state=$2::jsonb,updated_at=now() WHERE id=$1`,
+    [info.room.id, JSON.stringify(result.game)]);
+  if (result.game.phase === 'over') await settle(c, info.room, info.members, result.game);
+  return load(c,info.room.id);
+}
 async function maintain(c){
+  // Traiter les absences meme si tous les joueurs ont ferme la page.
+  const active = (await c.query(`SELECT id FROM maf_monopoly_rooms WHERE status='playing' ORDER BY id LIMIT 200`)).rows;
+  for (const row of active) await advancePresence(c,await load(c,row.id));
   // Les salons jamais demarres n'ont aucune mise. Les parties inactives sont remboursees apres 24h.
   const waiting=(await c.query(`SELECT id FROM maf_monopoly_rooms WHERE status IN ('waiting','proposed')
     AND created_at < now()-interval '30 minutes' FOR UPDATE`)).rows;
@@ -143,10 +158,10 @@ monopolyRoomsRouter.get('/mine',requireSession,handler(async(req,res)=>{
   const rows=(await pool.query(`SELECT r.id FROM maf_monopoly_rooms r
     JOIN maf_monopoly_players p ON p.room_id=r.id WHERE p.user_id=$1
     AND r.status IN ('waiting','proposed','playing') ORDER BY r.created_at DESC LIMIT 1`,[req.userId])).rows;
-  res.json({room:rows[0]?view(await transaction(c=>load(c,rows[0].id)),req.userId):null});
+  res.json({room:rows[0]?view(await transaction(async c=>advancePresence(c,await load(c,rows[0].id))),req.userId):null});
 }));
 monopolyRoomsRouter.get('/:id',requireSession,handler(async(req,res)=>{
-  const info=await transaction(c=>load(c,parseId(req.params.id)));
+  const info=await transaction(async c=>advancePresence(c,await load(c,parseId(req.params.id))));
   participant(info.members,req.userId);
   res.json({room:view(info,req.userId)});
 }));
@@ -224,9 +239,24 @@ monopolyRoomsRouter.post('/:id/vote',requireSession,handler(async(req,res)=>{
     return load(c,i.room.id);
   });res.json({room:view(info,req.userId)});
 }));
+monopolyRoomsRouter.post('/:id/presence',requireSession,handler(async(req,res)=>{
+  const state=req.body?.state;
+  if(!['here','away'].includes(state))throw fail(400,'Presence invalide.');
+  const info=await transaction(async c=>{
+    const i=await advancePresence(c,await load(c,parseId(req.params.id)));
+    participant(i.members,req.userId);
+    if(i.room.status!=='playing') return i;
+    const game=structuredClone(i.room.match_state);
+    if(setPresence(game,i.members,req.userId,state)){
+      await c.query('UPDATE maf_monopoly_rooms SET match_state=$2::jsonb WHERE id=$1',[i.room.id,JSON.stringify(game)]);
+    }
+    return load(c,i.room.id);
+  });
+  res.json({room:view(info,req.userId)});
+}));
 monopolyRoomsRouter.post('/:id/action',requireSession,handler(async(req,res)=>{
   const info=await transaction(async c=>{
-    const i=await load(c,parseId(req.params.id)); participant(i.members,req.userId);
+    const i=await advancePresence(c,await load(c,parseId(req.params.id))); participant(i.members,req.userId);
     if(i.room.status!=='playing'||!i.room.match_state)throw fail(409,'Aucune partie active.');
     const g=i.room.match_state;
     const index=i.members.findIndex(m=>m.id===req.userId);

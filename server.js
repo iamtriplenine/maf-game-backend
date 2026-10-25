@@ -67,4 +67,4 @@ setInterval(() => { void maintainRooms().catch(error => console.error("room main
 void maintainRooms().catch(error => console.error("room maintenance:", error.message));
 
 // En attente : fermer les salons expires ; en partie : rembourser les mises si 24 h sans action.
-setInterval(() => { void maintainMonopolyRooms().catch(error => console.error("monopoly maintenance:", error.message)); }, 60_000).unref();
+setInterval(() => { void maintainMonopolyRooms().catch(error => console.error("monopoly maintenance:", error.message)); }, 2_000).unref();
