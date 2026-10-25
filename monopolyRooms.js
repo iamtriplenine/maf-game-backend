@@ -7,6 +7,7 @@ import { ensureWallet } from './wallet.js';
 import { validateSetup, proposeStart, voteStart } from './monopolyRoomRules.js';
 import { createGame, rollDice, buy, build, sell, endTurn, giveUp, canBuy, buildOptions, sellOptions } from './engine.js';
 import { initPresence, setPresence, expirePresence } from './monopolyPresence.js';
+import { normalizeTurnClock, tickTurnClock } from './monopolyTurnClock.js';
 
 export const monopolyRoomsRouter = Router();
 const fail = (status, message) => Object.assign(new Error(message), { status });
@@ -82,7 +83,7 @@ async function start(c,room,members) {
   const missing=balances.find(x=>x.balance<room.stake);
   if(missing) throw fail(402,`Le joueur #${missing.id} n'a pas la mise necessaire. Aucun compte n'a ete debite.`);
   await c.query('UPDATE maf_users SET balance=balance-$2 WHERE id=ANY($1::int[])',[ids,room.stake]);
-  const game=initPresence(createGame({names:members.map(p=>p.name),dice:2,rng:rand}),ids);
+  const game=normalizeTurnClock(initPresence(createGame({names:members.map(p=>p.name),dice:2,rng:rand}),ids));
   const escrow=members.length*room.stake;
   await c.query(`UPDATE maf_monopoly_rooms SET status='playing',proposal=NULL,
     match_state=$2::jsonb,escrow=$3,updated_at=now() WHERE id=$1`,[room.id,JSON.stringify(game),escrow]);
@@ -102,10 +103,11 @@ async function advancePresence(c, info) {
   const initialized = !info.room.match_state.presence;
   if (initialized) initPresence(info.room.match_state, info.members.map(m=>m.id));
   const result = expirePresence(info.room.match_state, info.members);
-  if (!result.changed && !initialized) return info;
+  const clock = tickTurnClock(result.game,{rng:rand});
+  if (!result.changed && !clock.changed && !initialized) return info;
   await c.query(`UPDATE maf_monopoly_rooms SET match_state=$2::jsonb,updated_at=now() WHERE id=$1`,
-    [info.room.id, JSON.stringify(result.game)]);
-  if (result.game.phase === 'over') await settle(c, info.room, info.members, result.game);
+    [info.room.id, JSON.stringify(clock.game)]);
+  if (clock.game.phase === 'over') await settle(c, info.room, info.members, clock.game);
   return load(c,info.room.id);
 }
 async function maintain(c){
@@ -282,6 +284,7 @@ monopolyRoomsRouter.post('/:id/action',requireSession,handler(async(req,res)=>{
       }
     }
     if(next===g)throw fail(409,'Action non autorisee dans cette phase.');
+    normalizeTurnClock(next);
     await c.query(`UPDATE maf_monopoly_rooms SET match_state=$2::jsonb,updated_at=now() WHERE id=$1`,[i.room.id,JSON.stringify(next)]);
     if(next.phase==='over')await settle(c,i.room,i.members,next);
     return load(c,i.room.id);
