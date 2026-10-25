@@ -2,7 +2,7 @@
 // Mises REELLES : debitees quand le createur accepte l'adversaire, retenues sur le salon (escrow),
 // versees au gagnant a la fin du match, ou remboursees si le salon est ferme avant la fin.
 import crypto from 'node:crypto';
-import { getTankRunRuntime, tankRunPress, dropTankRunRuntime } from './tankRunRealtime.js'; // MAF_TANKRUN_ROOM_V1
+import { getTankRunRuntime, tankRunPress, dropTankRunRuntime, peekTankRunRuntime } from './tankRunRealtime.js'; // MAF_TANKRUN_ROOM_V1
 import { initialDice, rollDice, diceView, validateDiceSettings } from './diceEngine.js'; // MAF_DICE_BACKEND_V1
 import { assertCanCreateRoom, assertHostAvailable, assertCanRequestRoom, assertPlayersAvailable } from './multiRooms.js'; // MAF_MULTIROOM_V1 // MAF_ROOMS_FREE_UNTIL_ACCEPTED_V1
 import { Router } from 'express';
@@ -631,7 +631,27 @@ roomsRouter.post('/:id/match/tankrun/prepare',requireSession,respond(async(req,r
  res.json({room:shown(room,req.userId),...visibleMatch(room,req.userId)});
 }));
 // Lecture snapshot: calcule et publie UNIQUEMENT l'etat du serveur (pas de resultat client).
+// MAF_TANKRUN_LAG_V1 : voie rapide. Tant que la simulation tourne en memoire, on
+// reconnait les deux joueurs sans interroger la base (c'etait ~100 ms perdues a chaque
+// requete). La base est verifiee en arriere-plan toutes les 3 s.
+function tankRunLive(req){
+ const live=peekTankRunRuntime(roomId(req.params.id));
+ if(!live)return null;
+ const index=live.players.indexOf(req.userId);
+ if(index<0)return null;
+ if(Date.now()-live.verifyAt>3000){
+  live.verifyAt=Date.now();
+  load(pool,roomId(req.params.id)).then(
+   (row)=>{if(row.status!=='playing')dropTankRunRuntime(row.id)},
+   (e)=>{if(e&&e.status===404)dropTankRunRuntime(req.params.id)});
+ }
+ return {live,index};
+}
 roomsRouter.get('/:id/match/tankrun/snapshot',requireSession,respond(async(req,res)=>{
+ const fast=tankRunLive(req);
+ if(fast&&req.query.lite==='1'){
+  return res.json({viewer:fast.index===0?'host':'guest',serverNow:Date.now(),...fast.live.lite(req.query.full==='1')});
+ }
  const r=await load(pool,roomId(req.params.id)); const viewer=side(r,req.userId);
  if(r.game!=='tankrun'||!viewer||!['playing','finished'].includes(r.status))throw fail(403,'Match indisponible.');
  if(r.status==='finished')return res.json({finished:true,winner:r.match_state?.winner,viewer});
@@ -644,13 +664,19 @@ roomsRouter.get('/:id/match/tankrun/snapshot',requireSession,respond(async(req,r
    if(state.draw)await refundRoom(client,latest);else await settleRoom(client,latest,state.winner);
   }); dropTankRunRuntime(roomId);
  },saveTankRunCheckpoint);
+ if(req.query.lite==='1')return res.json({viewer,serverNow:Date.now(),...runtime.lite(req.query.full==='1')});
  res.json({viewer,serverNow:Date.now(),...runtime.snapshot()});
 }));
 roomsRouter.post('/:id/match/tankrun/input',requireSession,respond(async(req,res)=>{
- const r=await load(pool,roomId(req.params.id));const viewer=side(r,req.userId);
- if(r.game!=='tankrun'||r.status!=='playing'||!viewer)throw fail(403,'Match non autorise.');
  const down=req.body?.down, ammo=req.body?.ammo;const seq=req.body?.seq,epoch=req.body?.epoch;
  if(typeof down!=='boolean'||!Number.isSafeInteger(seq)||seq<0||seq>100000000||typeof epoch!=='string'||epoch.length<8||epoch.length>100 || (ammo!=null&&!['standard','rapide','lourd','explosif','ricochet'].includes(ammo)))throw fail(400,'Commande invalide.');
+ // MAF_TANKRUN_LAG_V1 : temps de simulation vu par le joueur, angle vu, duree d'appui.
+ const num=(v,min,max)=>Number.isFinite(v)&&v>=min&&v<=max?v:null;
+ const extra={vt:num(req.body?.vt,0,1e7),aim:num(req.body?.aim,-1e4,1e4),held:num(req.body?.held,0,60)};
+ const fast=tankRunLive(req);
+ if(fast){tankRunPress(fast.live,fast.index,down,ammo,seq,epoch,extra);return res.json({ok:true})}
+ const r=await load(pool,roomId(req.params.id));const viewer=side(r,req.userId);
+ if(r.game!=='tankrun'||r.status!=='playing'||!viewer)throw fail(403,'Match non autorise.');
  const runtime=getTankRunRuntime(r,async(roomId,winner)=>{
   await transaction(async(client)=>{
    const latest=await load(client,roomId);if(latest.status!=='playing')return;
@@ -659,7 +685,7 @@ roomsRouter.post('/:id/match/tankrun/input',requireSession,respond(async(req,res
    if(state.draw)await refundRoom(client,latest);else await settleRoom(client,latest,state.winner);
   });dropTankRunRuntime(roomId);
  },saveTankRunCheckpoint);
- tankRunPress(runtime,viewer==='host'?0:1,down,ammo,seq,epoch);
+ tankRunPress(runtime,viewer==='host'?0:1,down,ammo,seq,epoch,extra);
  res.json({ok:true});
 }));
 

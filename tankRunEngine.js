@@ -144,7 +144,11 @@ export class Game {
   }
 
   // ---------- Entrée : UNE seule commande par joueur ----------
-  setInput(i, down) {
+  // opts (facultatif, utilise par le mode en ligne) :
+  //   aim  = angle que le joueur VOYAIT au moment de l'appui (compensation de latence)
+  //   held = duree d'appui mesuree par le client (evite qu'un retard reseau
+  //          transforme un tap en appui long)
+  setInput(i, down, opts) {
     const t = this.tanks[i];
     if (!t) return;
     const active = this.phase === 'playing' || this.phase === 'ending';
@@ -155,10 +159,17 @@ export class Game {
     if (down && !t.pressed) {
       t.pressed = true;
       t.heldFor = 0;
+      // MAF_TANKRUN_LAG_V1 : le char tourne encore cote serveur pendant que la
+      // commande voyage. On revient a l'angle que le joueur voyait. Pendant une
+      // rafale l'angle est deja fige, on n'y touche pas.
+      if (opts && Number.isFinite(opts.aim) && t.human && !(t.burstTime > 0) && !(t.pendingShots > 0)) {
+        t.angle = opts.aim;
+      }
       // Figer l'angle des le contact pour que le tir parte ou le joueur a vise.
       t.pressAngle = t.angle;
     } else if (!down && t.pressed) {
-      const wasHold = t.heldFor >= this.cfg.holdThreshold;
+      const clientHeld = opts && Number.isFinite(opts.held) ? clamp(opts.held, 0, 10) : null;
+      const wasHold = (clientHeld != null ? clientHeld : t.heldFor) >= this.cfg.holdThreshold;
       t.pressed = false;
       t.heldFor = 0;
       t.moving = false;
