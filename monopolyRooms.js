@@ -63,7 +63,7 @@ function view({room,members},viewer) {
     stake:room.stake,status:room.status,players:members,proposal:me ? room.proposal:null,
     game:me && room.match_state ? {...room.match_state,decks:undefined} : null,
     escrow:me ? room.escrow : 0,winnerId:room.winner_id,payout:room.payout,
-    createdAt:room.created_at};
+    createdAt:room.created_at,serverNow:Date.now()};
 }
 function participant(members,uid) { if(!members.some(m=>m.id===uid)) throw fail(403,'Tu ne participes pas a ce salon.'); }
 async function audit(c,event,details){ await c.query(`INSERT INTO maf_wallet_audit(actor,event,details)
@@ -119,12 +119,25 @@ export async function maintainMonopolyRooms() {
 }
 monopolyRoomsRouter.use((_req,res,next)=>{res.set('Cache-Control','no-store'); if(!pool)return res.status(503).json({error:'Base de donnees indisponible.'}); ensureMonopolyRooms().then(()=>next(),next);});
 monopolyRoomsRouter.get('/',handler(async(req,res)=>{
-  const rows=(await pool.query(`SELECT r.id,r.code,r.max_players,r.stake,r.status,r.host_id,u.pseudo AS host,
+  const rows=(await pool.query(`SELECT r.id,r.code,r.max_players,r.stake,r.status,r.host_id,r.created_at,u.pseudo AS host,
     count(p.user_id)::int AS present FROM maf_monopoly_rooms r
     JOIN maf_users u ON u.id=r.host_id LEFT JOIN maf_monopoly_players p ON p.room_id=r.id
     WHERE r.status IN ('waiting','proposed') AND r.created_at>now()-interval '30 minutes'
     GROUP BY r.id,u.pseudo ORDER BY r.created_at DESC LIMIT 50`)).rows;
-  res.json({rooms:rows.map(r=>({id:Number(r.id),code:r.code,maxPlayers:r.max_players,stake:r.stake,status:r.status,host:r.host,present:r.present}))});
+  res.json({rooms:rows.map(r=>({id:Number(r.id),code:r.code,maxPlayers:r.max_players,stake:r.stake,status:r.status,host:r.host,present:r.present,createdAt:r.created_at,serverNow:Date.now()}))});
+}));
+// Recherche publique d'un code Monopoly (6 chiffres), dans l'onglet Salon commun.
+monopolyRoomsRouter.get('/code/:code',handler(async(req,res)=>{
+  const code=String(req.params.code||'');
+  if(!/^\d{6}$/.test(code))throw fail(400,'Le code Monopoly contient 6 chiffres.');
+  const r=(await pool.query(`SELECT r.id,r.code,r.max_players,r.stake,r.status,r.host_id,r.created_at,u.pseudo AS host,
+    count(p.user_id)::int AS present FROM maf_monopoly_rooms r
+    JOIN maf_users u ON u.id=r.host_id LEFT JOIN maf_monopoly_players p ON p.room_id=r.id
+    WHERE r.code=$1 AND r.status IN ('waiting','proposed') AND r.created_at>now()-interval '30 minutes'
+    GROUP BY r.id,u.pseudo`,[code])).rows[0];
+  if(!r)throw fail(404,'Aucun salon Monopoly ouvert pour ce code.');
+  res.json({room:{id:Number(r.id),code:r.code,maxPlayers:r.max_players,stake:r.stake,
+    status:r.status,host:r.host,present:r.present,createdAt:r.created_at,serverNow:Date.now()}});
 }));
 monopolyRoomsRouter.get('/mine',requireSession,handler(async(req,res)=>{
   const rows=(await pool.query(`SELECT r.id FROM maf_monopoly_rooms r
