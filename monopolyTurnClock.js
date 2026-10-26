@@ -12,14 +12,14 @@ export function normalizeTurnClock(game, now=Date.now()) {
   }
   return game;
 }
-export function tickTurnClock(state, {now=Date.now(), rng=Math.random, autoEnd=false}={}) {
+export function tickTurnClock(state, {now=Date.now(), rng=Math.random, autoEnd=false,forced=null}={}) {
   let game=structuredClone(state),changed=!game.turnClock;
   normalizeTurnClock(game,now);
   if(game.phase==='over')return {game,changed};
   // Traiter un seul changement de phase par passage, pour laisser un vrai delai suivant.
   if(now<game.turnClock.dueAt)return {game,changed};
   if(game.phase==='roll'){
-    game=rollDice(game,{rng});
+    game=rollDice(game,{rng,forced});
     normalizeTurnClock(game,now);
     return {game,changed:true,auto:'roll'};
   }

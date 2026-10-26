@@ -117,14 +117,22 @@ export function buildOptions(s, p = s.current) {
 export const sellOptions = (s, p = s.current) => ownedBy(s, p).map((i) => ({ square: i, value: sellValue(s, i) }));
 
 // ----------------------------------------------------------------- argent
+// Metadonnee d'affichage : aucun changement des calculs ou du journal existant.
+export function recordMoneyChange(s,p,amount,kind='balance') {
+  if(!Number.isFinite(amount)||amount===0)return;
+  s.moneySeq=(s.moneySeq||0)+1;
+  s.players[p].lastTransaction={amount,seq:s.moneySeq,kind};
+}
 function credit(s, p, amount) {
   s.players[p].balance += amount;
+  recordMoneyChange(s,p,amount,'credit');
   s.stats.received += amount;
 }
 
 function declareBankrupt(s, p) {
   const me = s.players[p];
   me.bankrupt = true;
+  recordMoneyChange(s,p,-me.balance,'bankrupt');
   me.balance = 0;
   for (let i = 0; i < 40; i += 1) {
     if (s.owners[i] === p) { s.owners[i] = null; s.houses[i] = 0; }
@@ -147,6 +155,7 @@ function charge(s, p, amount, creditor, label) {
   const me = s.players[p];
   if (me.balance >= amount) {
     me.balance -= amount;
+    recordMoneyChange(s,p,-amount,label||'payment');
     s.stats.paid += amount;
     if (creditor !== null && creditor !== undefined) credit(s, creditor, amount);
     const kind = creditor !== null && creditor !== undefined
@@ -251,6 +260,7 @@ export function buy(state) {
   const me = s.players[p];
   const q = SQUARES[me.location];
   me.balance -= q.price;
+  recordMoneyChange(s,p,-q.price,'purchase');
   s.stats.paid += q.price;
   s.owners[q.id] = p;
   s.purchasedThisTurn = q.type === 'prop' ? q.id : null;
@@ -264,6 +274,7 @@ export function build(state, square) {
   const s = clone(state);
   const me = s.players[s.current];
   me.balance -= opt.price;
+  recordMoneyChange(s,s.current,-opt.price,'build');
   s.stats.paid += opt.price;
   s.houses[square] += 1;
   (s.builtThisTurn ||= []).push(square);
@@ -279,6 +290,7 @@ export function sell(state, square) {
   const p = s.current;
   const value = sellValue(s, square);
   s.players[p].balance += value;
+  recordMoneyChange(s,p,value,'sale');
   s.stats.received += value;
   s.owners[square] = null;
   s.houses[square] = 0;
@@ -334,7 +346,9 @@ export function endTurn(state) {
 export function setBalance(state, amount) {
   if (state.phase === 'over') return state;
   const s = clone(state);
+  const before=s.players[s.current].balance;
   s.players[s.current].balance = Math.max(0, Math.floor(amount));
+  recordMoneyChange(s,s.current,s.players[s.current].balance-before,'balance');
   say(s, s.current, `(test) solde fixé à ${s.players[s.current].balance} $`, 'debug');
   return s;
 }

@@ -1,5 +1,5 @@
 // Controle serveur de presence : 2 minutes pour revenir a la partie.
-import { giveUp } from './engine.js';
+import { giveUp, recordMoneyChange } from './engine.js';
 export const RECONNECT_MS = 120_000;
 export const HEARTBEAT_GRACE_MS = 20_000;
 function log(game, index, text, kind) {
@@ -60,6 +60,7 @@ export function expirePresence(game, members, now = Date.now()) {
       log(game, index, 'a été éliminé après 2 minutes d’absence.', 'bankrupt');
     } else {
       game.players[index].bankrupt = true;
+      recordMoneyChange(game,index,-game.players[index].balance,'bankrupt');
       game.players[index].balance = 0;
       for (let sq = 0; sq < 40; sq += 1) {
         if (game.owners[sq] === index) { game.owners[sq] = null; game.houses[sq] = 0; }

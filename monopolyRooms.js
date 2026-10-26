@@ -5,11 +5,12 @@ import { pool } from './db.js';
 import { ensureTable, requireSession } from './auth.js';
 import { ensureWallet } from './wallet.js';
 import { validateSetup, proposeStart, voteStart } from './monopolyRoomRules.js';
-import { createGame, rollDice, buy, build, sell, endTurn, giveUp, canBuy, buildOptions, sellOptions } from './engine.js';
+import { createGame, rollDice, recordMoneyChange, buy, build, sell, endTurn, giveUp, canBuy, buildOptions, sellOptions } from './engine.js';
 import { initPresence, setPresence, expirePresence } from './monopolyPresence.js';
 import { normalizeTurnClock, tickTurnClock } from './monopolyTurnClock.js';
 import { winAccessForRoom } from './winPractice.js';
 import { authorizedWinDice } from './winDice.js';
+import {queuedWinDice,assertRollTarget,visibleWinChoice} from './monopolyWinQueue.js';
 
 export const monopolyRoomsRouter = Router();
 const fail = (status, message) => Object.assign(new Error(message), { status });
@@ -41,6 +42,7 @@ export function ensureMonopolyRooms() {
         seat smallint NOT NULL CHECK (seat BETWEEN 0 AND 3),
         PRIMARY KEY(room_id,user_id), UNIQUE(room_id,seat)
       )`);
+      await c.query('ALTER TABLE maf_monopoly_rooms ADD COLUMN IF NOT EXISTS win_roll jsonb');
       await c.query(`CREATE INDEX IF NOT EXISTS maf_monopoly_public ON maf_monopoly_rooms(status,created_at DESC)`);
       await c.query('COMMIT');
     } catch(e) { await c.query('ROLLBACK'); throw e; } finally { c.release(); }
@@ -70,7 +72,7 @@ async function view({room,members},viewer) {
     stake:room.stake,status:room.status,players:members,proposal:me ? room.proposal:null,
     game:me && room.match_state ? {...room.match_state,decks:undefined} : null,
     escrow:me ? room.escrow : 0,winnerId:room.winner_id,payout:room.payout,
-    ...(winAvailable ? {winModeAvailable:true} : {}),
+    ...(winAvailable ? {winModeAvailable:true,winDiceSelection:visibleWinChoice(room,room.match_state,viewer)} : {}),
     createdAt:room.created_at,serverNow:Date.now()};
 }
 function participant(members,uid) { if(!members.some(m=>m.id===uid)) throw fail(403,'Tu ne participes pas a ce salon.'); }
@@ -109,10 +111,13 @@ async function advancePresence(c, info) {
   const initialized = !info.room.match_state.presence;
   if (initialized) initPresence(info.room.match_state, info.members.map(m=>m.id));
   const result = expirePresence(info.room.match_state, info.members);
-  const clock = tickTurnClock(result.game,{rng:rand,autoEnd:true});
+  const due=result.game.phase==='roll'&&Number(result.game.turnClock?.dueAt)<=Date.now();
+  const forced=due?await queuedWinDice(c,info.room,info.members,result.game):null;
+  const clock = tickTurnClock(result.game,{rng:rand,autoEnd:true,forced});
   if (!result.changed && !clock.changed && !initialized) return info;
   await c.query(`UPDATE maf_monopoly_rooms SET match_state=$2::jsonb,updated_at=now() WHERE id=$1`,
     [info.room.id, JSON.stringify(clock.game)]);
+  if(clock.auto==='roll'||clock.game.current!==info.room.match_state.current||clock.game.turn!==info.room.match_state.turn||clock.game.phase==='over')await c.query('UPDATE maf_monopoly_rooms SET win_roll=NULL WHERE id=$1',[info.room.id]);
   if (clock.game.phase === 'over') await settle(c, info.room, info.members, clock.game);
   return load(c,info.room.id);
 }
@@ -262,6 +267,25 @@ monopolyRoomsRouter.post('/:id/presence',requireSession,handler(async(req,res)=>
   });
   res.json({room:await view(info,req.userId)});
 }));
+monopolyRoomsRouter.post('/:id/win-dice',requireSession,handler(async(req,res)=>{
+  const info=await transaction(async c=>{
+    const i=await advancePresence(c,await load(c,parseId(req.params.id)));
+    participant(i.members,req.userId);
+    if(i.room.status!=='playing')throw fail(409,'La partie nest plus en cours.');
+    const g=i.room.match_state,index=i.members.findIndex(m=>m.id===req.userId);
+    if(g.players[index]?.bankrupt)throw fail(403,'Tu es elimine de cette partie.');
+    assertRollTarget(g,req.body?.turn,req.body?.playerId,i.members);
+    const clear=req.body?.dice===null;
+    const dice=await authorizedWinDice(c,req.userId,'monopoly',i.room.id,
+      clear?Array(g.dice).fill(1):req.body?.dice,g.dice,i.members[index].name);
+    if(!clear&&!dice)throw fail(400,'Choisis les faces avant denregistrer.');
+    if(clear&&i.room.win_roll?.by!==req.userId)throw fail(409,'Aucun de tes choix nest enregistre pour ce tour.');
+    const choice=clear?null:{by:req.userId,turn:g.turn,player:g.current,dice};
+    await c.query('UPDATE maf_monopoly_rooms SET win_roll=$2::jsonb WHERE id=$1',[i.room.id,choice?JSON.stringify(choice):null]);
+    return load(c,i.room.id);
+  });
+  res.json({room:await view(info,req.userId)});
+}));
 monopolyRoomsRouter.post('/:id/action',requireSession,handler(async(req,res)=>{
   const info=await transaction(async c=>{
     const i=await advancePresence(c,await load(c,parseId(req.params.id))); participant(i.members,req.userId);
@@ -275,8 +299,9 @@ monopolyRoomsRouter.post('/:id/action',requireSession,handler(async(req,res)=>{
     let next=g;
     if(action==='roll') {
       if(g.phase!=='roll')throw fail(409,'Lancer non autorise dans cette phase.');
-      const forced=await authorizedWinDice(c,req.userId,'monopoly',i.room.id,
+      const own=await authorizedWinDice(c,req.userId,'monopoly',i.room.id,
         req.body?.dice,g.dice,i.members[index]?.name);
+      const forced=own||await queuedWinDice(c,i.room,i.members,g);
       next=rollDice(g,{rng:rand,forced});
     }
     if(action==='buy')next=buy(g);
@@ -288,7 +313,7 @@ monopolyRoomsRouter.post('/:id/action',requireSession,handler(async(req,res)=>{
       if(index===g.current)next=giveUp(g);
       else {
         next=structuredClone(g);
-        next.players[index].bankrupt=true;next.players[index].balance=0;
+        next.players[index].bankrupt=true;recordMoneyChange(next,index,-next.players[index].balance,'bankrupt');next.players[index].balance=0;
         for(let sq=0;sq<40;sq++)if(next.owners[sq]===index){next.owners[sq]=null;next.houses[sq]=0;}
         next.seq+=1;next.log.unshift({n:next.seq,player:index,text:'a abandonne la partie',kind:'bankrupt'});
         if(next.players.filter(p=>!p.bankrupt).length===1){next.phase='over';next.winner=next.players.find(p=>!p.bankrupt).id;}
@@ -297,6 +322,7 @@ monopolyRoomsRouter.post('/:id/action',requireSession,handler(async(req,res)=>{
     if(next===g)throw fail(409,'Action non autorisee dans cette phase.');
     normalizeTurnClock(next);
     await c.query(`UPDATE maf_monopoly_rooms SET match_state=$2::jsonb,updated_at=now() WHERE id=$1`,[i.room.id,JSON.stringify(next)]);
+    if(action==='roll'||next.turn!==g.turn||next.current!==g.current||next.phase==='over')await c.query('UPDATE maf_monopoly_rooms SET win_roll=NULL WHERE id=$1',[i.room.id]);
     if(next.phase==='over')await settle(c,i.room,i.members,next);
     return load(c,i.room.id);
   });res.json({room:await view(info,req.userId)});
