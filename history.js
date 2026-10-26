@@ -3,6 +3,7 @@ import { Router } from 'express';
 import { pool } from './db.js';
 import { requireSession } from './auth.js';
 import { ensureRooms } from './rooms.js';
+import { ensureMonopolyRooms } from './monopolyRooms.js';
 
 export const historyRouter = Router();
 const route = fn => async (req,res,next) => {
@@ -28,7 +29,7 @@ historyRouter.use((_req,res,next) => {
   next();
 });
 historyRouter.use(requireSession);
-historyRouter.use((_req,_res,next) => { ensureRooms().then(() => next(),next); });
+historyRouter.use((_req,_res,next) => { ensureRooms().then(() => ensureMonopolyRooms()).then(() => next(),next); });
 
 // Une demande de depot/retrait garde une seule ligne avec son etat courant.
 // Les mouvements des jeux proviennent du journal atomique, sans doubler les paiements.
@@ -57,6 +58,25 @@ const transactions = `
   WHERE (a.event IN ('room_stakes_held','room_refund') AND a.details->'users' @> jsonb_build_array($1::integer))
     OR (a.event='room_payout' AND a.details->>'winner_id'=$1::text)
     OR (a.event='room_refund_expired' AND (r.host_id=$1 OR r.guest_id=$1))
+  UNION ALL
+  SELECT 'monopoly:' || a.id::text,
+    CASE a.event WHEN 'monopoly_stake_locked' THEN 'game_stake'
+      WHEN 'monopoly_payout' THEN 'game_payout' ELSE 'game_refund' END,
+    CASE WHEN a.event='monopoly_payout' THEN (a.details->>'pot')::integer
+      ELSE (a.details->>'stake')::integer END,
+    'F','approved',
+    CASE WHEN a.event='monopoly_stake_locked' THEN -(a.details->>'stake')::integer
+      WHEN a.event='monopoly_payout' THEN (a.details->>'pot')::integer
+      ELSE (a.details->>'stake')::integer END,
+    NULL,'Monopoly',r.id::text,a.created_at,NULL,trim(r.code),0,
+    CASE WHEN a.event='monopoly_payout' THEN (a.details->>'pot')::integer
+      ELSE (a.details->>'stake')::integer END
+  FROM maf_wallet_audit a
+    JOIN maf_monopoly_rooms r ON r.id::text=a.details->>'roomId'
+    JOIN maf_monopoly_players p ON p.room_id=r.id AND p.user_id=$1
+  WHERE (a.event='monopoly_stake_locked' AND a.details->'ids' @> jsonb_build_array($1::integer))
+    OR (a.event='monopoly_payout' AND a.details->>'winner'=$1::text)
+    OR a.event IN ('monopoly_refund','monopoly_timeout_refund')
 `;
 historyRouter.get('/transactions',route(async (req,res) => {
   const { limit,offset } = pagination(req);
@@ -92,6 +112,28 @@ const games = `
   FROM maf_rooms r JOIN maf_users h ON h.id=r.host_id LEFT JOIN maf_users g ON g.id=r.guest_id
   WHERE (r.host_id=$1 OR r.guest_id=$1)
     AND (jsonb_typeof(r.match_state)='object' OR r.escrow>0 OR r.settled_at IS NOT NULL)
+  UNION ALL
+  SELECT r.id::text,trim(r.code),'monopoly',NULL::integer,r.stake,r.status,r.payout,r.escrow,
+    r.created_at,r.updated_at,r.settled_at,
+    p.seat::text,
+    (SELECT string_agg(u.pseudo,', ' ORDER BY other.seat)
+      FROM maf_monopoly_players other JOIN maf_users u ON u.id=other.user_id
+      WHERE other.room_id=r.id AND other.user_id<>$1),
+    NULL::jsonb,r.winner_id::text,NULL::text,
+    CASE WHEN r.status='closed' THEN 'cancelled'
+      WHEN r.status='finished' AND r.winner_id=$1 THEN 'won'
+      WHEN r.status='finished' AND r.winner_id IS NOT NULL THEN 'lost'
+      WHEN r.status='finished' AND r.settled_at IS NOT NULL THEN 'cancelled'
+      WHEN r.status='finished' THEN 'unknown' ELSE 'ongoing' END,
+    CASE WHEN r.settled_at IS NULL THEN NULL
+      WHEN r.winner_id IS NULL THEN 0
+      WHEN r.winner_id=$1 THEN r.payout-r.stake ELSE -r.stake END,
+    CASE WHEN r.settled_at IS NULL THEN NULL
+      WHEN r.winner_id IS NULL THEN r.stake
+      WHEN r.winner_id=$1 THEN r.payout ELSE 0 END
+  FROM maf_monopoly_rooms r
+    JOIN maf_monopoly_players p ON p.room_id=r.id AND p.user_id=$1
+  WHERE jsonb_typeof(r.match_state)='object' OR r.escrow>0 OR r.settled_at IS NOT NULL
 `;
 historyRouter.get('/games',route(async (req,res) => {
   const { limit,offset } = pagination(req);
@@ -101,8 +143,8 @@ historyRouter.get('/games',route(async (req,res) => {
         'won',count(*) FILTER (WHERE outcome='won'),'lost',count(*) FILTER (WHERE outcome='lost'),
         'cancelled',count(*) FILTER (WHERE outcome='cancelled'),'net',coalesce(sum(net),0),
         'unsettled',count(*) FILTER (WHERE status='finished' AND net IS NULL)) FROM entries) AS summary,
-      coalesce((SELECT jsonb_agg(p ORDER BY p.updated_at DESC,p.id::bigint DESC)
-        FROM (SELECT * FROM entries ORDER BY updated_at DESC,id::bigint DESC LIMIT $2 OFFSET $3) p),'[]'::jsonb) AS items`,
+      coalesce((SELECT jsonb_agg(p ORDER BY p.updated_at DESC,p.id::bigint DESC,p.game DESC)
+        FROM (SELECT * FROM entries ORDER BY updated_at DESC,id::bigint DESC,game DESC LIMIT $2 OFFSET $3) p),'[]'::jsonb) AS items`,
     [req.userId,limit,offset]);
   res.json({ ...rows[0],limit,offset });
 }));
