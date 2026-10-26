@@ -10,6 +10,7 @@ import { pool } from './db.js';
 import { ensureTable, readToken, requireSession } from './auth.js';
 import { ensureWallet } from './wallet.js';
 import { winAccessForRoom } from './winPractice.js';
+import { authorizedWinDice } from './winDice.js';
 import { blankMatch, roleFor, recordChoice } from './penaltyEngine.js';
 import {tankInitial,tankFire,tankForfeit,tankOfferDraw,tankRespondDraw,tankCancelDraw,tankView,TANK_TURN_MS} from './tankEngine.js';
 // MAF_TANK_BACKEND_V1
@@ -536,10 +537,11 @@ async function visibleMatch(r, uid) {
   // sont relies au premier match consulte, sans toucher au calcul des gains.
   const ownerWin = process.env.MAF_OWNER_WIN_MODE === '1' &&
     (viewer === 'host' ? r.host_pseudo : r.guest_pseudo) === '999';
-  const winAvailable = r.status === 'playing' && ['penalty','tank'].includes(r.game) &&
+  const winAvailable = r.status === 'playing' && ['penalty','tank','dice'].includes(r.game) &&
     (ownerWin || await winAccessForRoom(uid,r.game,r.id));
   if (r.game === 'tankrun') return { status:r.status, match:{...state, viewer, serverNow:Date.now()} };
   if (r.game === 'dice') return { status:r.status, match:{ ...diceView(state, viewer),
+    ...(winAvailable ? { winModeAvailable:true } : {}),
     opponentReturnDeadline:r.departures?.[other(viewer)] ?? null,
     returnDeadline:r.departures?.[viewer] ?? null, serverNow:Date.now() } };
   if (r.game === 'tank') return {
@@ -720,7 +722,10 @@ roomsRouter.post('/:id/match/dice/roll', requireSession, respond(async (req,res)
       throw fail(409, 'Aucun duel de des en cours.');
     if (room.departures?.[viewer]) throw fail(409, 'Reviens dans le match avant de lancer.');
     const state = room.match_state;
-    try { rollDice(state, viewer); }
+    const forced = await authorizedWinDice(client,req.userId,'dice',room.id,
+      req.body?.dice,state.diceCount,viewer==='host'?room.host_pseudo:room.guest_pseudo);
+    let face = 0;
+    try { rollDice(state, viewer, ...(forced ? [() => forced[face++]] : [])); }
     catch (error) { throw fail(409, error.message); }
     await client.query('UPDATE maf_rooms SET match_state=$2::jsonb, status=$3,updated_at=now() WHERE id=$1',
       [room.id, JSON.stringify(state), state.finished ? 'finished' : 'playing']);

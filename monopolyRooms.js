@@ -8,6 +8,8 @@ import { validateSetup, proposeStart, voteStart } from './monopolyRoomRules.js';
 import { createGame, rollDice, buy, build, sell, endTurn, giveUp, canBuy, buildOptions, sellOptions } from './engine.js';
 import { initPresence, setPresence, expirePresence } from './monopolyPresence.js';
 import { normalizeTurnClock, tickTurnClock } from './monopolyTurnClock.js';
+import { winAccessForRoom } from './winPractice.js';
+import { authorizedWinDice } from './winDice.js';
 
 export const monopolyRoomsRouter = Router();
 const fail = (status, message) => Object.assign(new Error(message), { status });
@@ -59,12 +61,16 @@ async function load(c,id) {
   const members = (await c.query(memberQuery,[id])).rows.map(m => ({id:Number(m.id), seat:m.seat, name:m.pseudo}));
   return {room,members};
 }
-function view({room,members},viewer) {
+async function view({room,members},viewer) {
   const me = members.some(p => p.id===viewer);
+  const winAvailable = me && room.status==='playing' &&
+    ((process.env.MAF_OWNER_WIN_MODE==='1' && members.find(p=>p.id===viewer)?.name==='999') ||
+      await winAccessForRoom(viewer,'monopoly',room.id));
   return {id:Number(room.id),code:room.code,hostId:room.host_id,maxPlayers:room.max_players,
     stake:room.stake,status:room.status,players:members,proposal:me ? room.proposal:null,
     game:me && room.match_state ? {...room.match_state,decks:undefined} : null,
     escrow:me ? room.escrow : 0,winnerId:room.winner_id,payout:room.payout,
+    ...(winAvailable ? {winModeAvailable:true} : {}),
     createdAt:room.created_at,serverNow:Date.now()};
 }
 function participant(members,uid) { if(!members.some(m=>m.id===uid)) throw fail(403,'Tu ne participes pas a ce salon.'); }
@@ -160,12 +166,12 @@ monopolyRoomsRouter.get('/mine',requireSession,handler(async(req,res)=>{
   const rows=(await pool.query(`SELECT r.id FROM maf_monopoly_rooms r
     JOIN maf_monopoly_players p ON p.room_id=r.id WHERE p.user_id=$1
     AND r.status IN ('waiting','proposed','playing') ORDER BY r.created_at DESC LIMIT 1`,[req.userId])).rows;
-  res.json({room:rows[0]?view(await transaction(async c=>advancePresence(c,await load(c,rows[0].id))),req.userId):null});
+  res.json({room:rows[0]?await view(await transaction(async c=>advancePresence(c,await load(c,rows[0].id))),req.userId):null});
 }));
 monopolyRoomsRouter.get('/:id',requireSession,handler(async(req,res)=>{
   const info=await transaction(async c=>advancePresence(c,await load(c,parseId(req.params.id))));
   participant(info.members,req.userId);
-  res.json({room:view(info,req.userId)});
+  res.json({room:await view(info,req.userId)});
 }));
 monopolyRoomsRouter.post('/',requireSession,handler(async(req,res)=>{
   const {maxPlayers,stake}=req.body||{};
@@ -190,7 +196,7 @@ monopolyRoomsRouter.post('/',requireSession,handler(async(req,res)=>{
     if(!row)throw fail(503,'Impossible de generer un code. Reessaie.');
     await c.query('INSERT INTO maf_monopoly_players(room_id,user_id,seat) VALUES($1,$2,0)',[row.id,req.userId]);
     return load(c,row.id);
-  });res.status(201).json({room:view(info,req.userId)});
+  });res.status(201).json({room:await view(info,req.userId)});
 }));
 monopolyRoomsRouter.post('/:id/join',requireSession,handler(async(req,res)=>{
   const info=await transaction(async c=>{
@@ -208,7 +214,7 @@ monopolyRoomsRouter.post('/:id/join',requireSession,handler(async(req,res)=>{
     await c.query('INSERT INTO maf_monopoly_players(room_id,user_id,seat) VALUES($1,$2,$3)',[i.room.id,req.userId,seat]);
     await c.query('UPDATE maf_monopoly_rooms SET updated_at=now() WHERE id=$1',[i.room.id]);
     return load(c,i.room.id);
-  });res.json({room:view(info,req.userId)});
+  });res.json({room:await view(info,req.userId)});
 }));
 monopolyRoomsRouter.post('/:id/leave',requireSession,handler(async(req,res)=>{
   const info=await transaction(async c=>{
@@ -219,7 +225,7 @@ monopolyRoomsRouter.post('/:id/leave',requireSession,handler(async(req,res)=>{
     else {await c.query('DELETE FROM maf_monopoly_players WHERE room_id=$1 AND user_id=$2',[i.room.id,req.userId]);
       await c.query(`UPDATE maf_monopoly_rooms SET status='waiting',proposal=NULL,updated_at=now() WHERE id=$1`,[i.room.id]);}
     return load(c,i.room.id);
-  });res.json({room:view(info,req.userId)});
+  });res.json({room:await view(info,req.userId)});
 }));
 monopolyRoomsRouter.post('/:id/propose',requireSession,handler(async(req,res)=>{
   const info=await transaction(async c=>{
@@ -228,7 +234,7 @@ monopolyRoomsRouter.post('/:id/propose',requireSession,handler(async(req,res)=>{
     let proposal;try{proposal=proposeStart(i.room,i.members.map(m=>m.id),req.body?.count,req.userId);}catch(e){throw fail(409,e.message);}
     await c.query(`UPDATE maf_monopoly_rooms SET status='proposed',proposal=$2::jsonb,updated_at=now() WHERE id=$1`,[i.room.id,JSON.stringify(proposal)]);
     return load(c,i.room.id);
-  });res.json({room:view(info,req.userId)});
+  });res.json({room:await view(info,req.userId)});
 }));
 monopolyRoomsRouter.post('/:id/vote',requireSession,handler(async(req,res)=>{
   const info=await transaction(async c=>{
@@ -239,7 +245,7 @@ monopolyRoomsRouter.post('/:id/vote',requireSession,handler(async(req,res)=>{
     else if(vote.unanimous){await start(c,i.room,i.members);}
     else {await c.query(`UPDATE maf_monopoly_rooms SET proposal=$2::jsonb,updated_at=now() WHERE id=$1`,[i.room.id,JSON.stringify(vote.proposal)]);}
     return load(c,i.room.id);
-  });res.json({room:view(info,req.userId)});
+  });res.json({room:await view(info,req.userId)});
 }));
 monopolyRoomsRouter.post('/:id/presence',requireSession,handler(async(req,res)=>{
   const state=req.body?.state;
@@ -254,7 +260,7 @@ monopolyRoomsRouter.post('/:id/presence',requireSession,handler(async(req,res)=>
     }
     return load(c,i.room.id);
   });
-  res.json({room:view(info,req.userId)});
+  res.json({room:await view(info,req.userId)});
 }));
 monopolyRoomsRouter.post('/:id/action',requireSession,handler(async(req,res)=>{
   const info=await transaction(async c=>{
@@ -267,7 +273,12 @@ monopolyRoomsRouter.post('/:id/action',requireSession,handler(async(req,res)=>{
     if(action!=='abandon'&&index!==g.current)throw fail(403,"Ce n'est pas ton tour.");
     if(action!=='abandon' && g.phase==='over')throw fail(409,'Partie terminee.');
     let next=g;
-    if(action==='roll')next=rollDice(g,{rng:rand});
+    if(action==='roll') {
+      if(g.phase!=='roll')throw fail(409,'Lancer non autorise dans cette phase.');
+      const forced=await authorizedWinDice(c,req.userId,'monopoly',i.room.id,
+        req.body?.dice,g.dice,i.members[index]?.name);
+      next=rollDice(g,{rng:rand,forced});
+    }
     if(action==='buy')next=buy(g);
     if(action==='build')next=build(g,req.body?.square);
     if(action==='sell')next=sell(g,req.body?.square);
@@ -288,5 +299,5 @@ monopolyRoomsRouter.post('/:id/action',requireSession,handler(async(req,res)=>{
     await c.query(`UPDATE maf_monopoly_rooms SET match_state=$2::jsonb,updated_at=now() WHERE id=$1`,[i.room.id,JSON.stringify(next)]);
     if(next.phase==='over')await settle(c,i.room,i.members,next);
     return load(c,i.room.id);
-  });res.json({room:view(info,req.userId)});
+  });res.json({room:await view(info,req.userId)});
 }));

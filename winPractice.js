@@ -18,23 +18,34 @@ let ready;
 export function ensureWinPractice() {
   if (!ready) ready = (async () => {
     await ensureTable();
-    await pool.query(`CREATE TABLE IF NOT EXISTS maf_win_practice_codes (
-      code text PRIMARY KEY,
-      creator_id integer NOT NULL REFERENCES maf_users(id),
-      game text NOT NULL CHECK (game IN ('all','penalty','tank')),
-      kind text NOT NULL CHECK (kind IN ('duration','match')),
-      duration_seconds integer CHECK (duration_seconds BETWEEN 60 AND 86400),
-      redeemed_by integer REFERENCES maf_users(id),
-      redeemed_at timestamptz,
-      expires_at timestamptz,
-      matches_left integer,
-      match_room_id bigint,
-      created_at timestamptz NOT NULL DEFAULT now(),
-      CHECK ((kind='duration' AND duration_seconds IS NOT NULL) OR
-             (kind='match' AND duration_seconds IS NULL))
-    )`);
-    await pool.query('ALTER TABLE maf_win_practice_codes ADD COLUMN IF NOT EXISTS match_room_id bigint');
-    await pool.query('CREATE INDEX IF NOT EXISTS maf_win_practice_redeemed_by ON maf_win_practice_codes(redeemed_by)');
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock(62498451)');
+      await client.query(`CREATE TABLE IF NOT EXISTS maf_win_practice_codes (
+        code text PRIMARY KEY,
+        creator_id integer NOT NULL REFERENCES maf_users(id),
+        game text NOT NULL CHECK (game IN ('all','penalty','tank','dice','monopoly')),
+        kind text NOT NULL CHECK (kind IN ('duration','match')),
+        duration_seconds integer CHECK (duration_seconds BETWEEN 60 AND 86400),
+        redeemed_by integer REFERENCES maf_users(id),
+        redeemed_at timestamptz,
+        expires_at timestamptz,
+        matches_left integer,
+        match_room_id bigint,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        CHECK ((kind='duration' AND duration_seconds IS NOT NULL) OR
+               (kind='match' AND duration_seconds IS NULL))
+      )`);
+      await client.query('ALTER TABLE maf_win_practice_codes ADD COLUMN IF NOT EXISTS match_room_id bigint');
+      await client.query('ALTER TABLE maf_win_practice_codes ADD COLUMN IF NOT EXISTS match_room_game text');
+      await client.query(`ALTER TABLE maf_win_practice_codes DROP CONSTRAINT IF EXISTS maf_win_practice_codes_game_check;
+        ALTER TABLE maf_win_practice_codes ADD CONSTRAINT maf_win_practice_codes_game_check
+          CHECK (game IN ('all','penalty','tank','dice','monopoly'))`);
+      await client.query('CREATE INDEX IF NOT EXISTS maf_win_practice_redeemed_by ON maf_win_practice_codes(redeemed_by)');
+      await client.query('COMMIT');
+    } catch(error) { await client.query('ROLLBACK'); throw error; }
+    finally { client.release(); }
   })().catch(e => { ready = null; throw e; });
   return ready;
 }
@@ -57,7 +68,7 @@ winPracticeRouter.use((req,res,next) => ensureWinPractice().then(() => next(), n
 winPracticeRouter.post('/create', run(async (req,res) => {
   await requireOwner(req);
   const { game, kind, duration_seconds:seconds } = req.body || {};
-  if (!['all','tank','penalty'].includes(game) || !['match','duration'].includes(kind))
+  if (!['all','tank','penalty','dice','monopoly'].includes(game) || !['match','duration'].includes(kind))
     throw fail(400,'Jeu ou duree invalide.');
   if (kind === 'duration' && (!Number.isSafeInteger(seconds) || seconds < 60 || seconds > 86400))
     throw fail(400,'Duree comprise entre 1 minute et 1 jour.');
@@ -110,7 +121,7 @@ winPracticeRouter.get('/me', run(async (req,res) => {
 // Une seule partie d'entrainement est consommee par le coupon de type "match".
 winPracticeRouter.post('/start', run(async (req,res) => {
   const game = req.body?.game, code = req.body?.code;
-  if (!['tank','penalty'].includes(game) || !codeRE.test(code))
+  if (!['tank','penalty','dice','monopoly'].includes(game) || !codeRE.test(code))
     throw fail(400,'Partie ou coupon invalide.');
   const client = await pool.connect();
   try {
@@ -135,21 +146,24 @@ winPracticeRouter.post('/start', run(async (req,res) => {
 // Autorisation par le serveur, jamais a partir d'un simple drapeau du navigateur.
 // La premiere lecture d'un match a deux consomme atomiquement les codes "une partie" :
 // les appels suivants du MEME match restent autorises; les autres salons ne le sont pas.
-export async function winAccessForRoom(userId, game, roomId) {
-  if (!['penalty','tank'].includes(game) || !Number.isSafeInteger(Number(roomId)) || Number(roomId) < 1) return false;
+export async function winAccessForRoom(userId, game, roomId, client = pool) {
+  if (!['penalty','tank','dice','monopoly'].includes(game) || !Number.isSafeInteger(Number(roomId)) || Number(roomId) < 1) return false;
   await ensureWinPractice();
-  const { rowCount } = await pool.query(`
+  const { rowCount } = await client.query(`
     UPDATE maf_win_practice_codes AS win
     SET matches_left = CASE WHEN win.kind='match' AND win.match_room_id IS NULL THEN 0 ELSE win.matches_left END,
-        match_room_id = CASE WHEN win.kind='match' AND win.match_room_id IS NULL THEN $3::bigint ELSE win.match_room_id END
+        match_room_id = CASE WHEN win.kind='match' AND win.match_room_id IS NULL THEN $3::bigint ELSE win.match_room_id END,
+        match_room_game = CASE WHEN win.kind='match' THEN $2 ELSE win.match_room_game END
     WHERE win.code = (
       SELECT code FROM maf_win_practice_codes
       WHERE redeemed_by=$1 AND expires_at>now() AND (game='all' OR game=$2)
-        AND (kind='duration' OR match_room_id=$3::bigint OR (matches_left=1 AND match_room_id IS NULL))
+        AND (kind='duration' OR (match_room_id=$3::bigint
+          AND (match_room_game=$2 OR (match_room_game IS NULL AND $2<>'monopoly'))) OR (matches_left=1 AND match_room_id IS NULL))
       ORDER BY redeemed_at DESC LIMIT 1
     )
       AND win.redeemed_by=$1 AND win.expires_at>now() AND (win.game='all' OR win.game=$2)
-      AND (win.kind='duration' OR win.match_room_id=$3::bigint
+      AND (win.kind='duration' OR (win.match_room_id=$3::bigint
+           AND (win.match_room_game=$2 OR (win.match_room_game IS NULL AND $2<>'monopoly')))
            OR (win.matches_left=1 AND win.match_room_id IS NULL))
     RETURNING win.code
   `, [userId,game,String(roomId)]);
