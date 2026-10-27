@@ -7,6 +7,7 @@ import { requireSession } from './auth.js';
 import { ensureTournamentCancellation } from './tournamentCancellation.js';
 import { createQualificationGame, playQualificationAction } from './tournamentQualificationGame.js';
 import { qualificationDraw, REQUIRED_PLAYERS } from './tournamentDraw.js';
+import { ensureFinalistsTables, recordWinnerForMatch } from './tournamentFinalistStore.js';
 
 export const tournamentQualificationRouter = Router();
 export const realQualificationEnabled = () => process.env.MAF_TOURNAMENT_REAL_START_ENABLED === 'true';
@@ -130,6 +131,7 @@ tournamentQualificationRouter.get('/qualifications/mine',requireSession,route(as
 tournamentQualificationRouter.post('/qualifications/:id/action',requireSession,route(async(req,res)=>{
   if(!realQualificationEnabled())throw fail(403,'Qualifications non ouvertes.');
   await ensureQualificationTables();
+  await ensureFinalistsTables();
   const id=numericId(req.params.id), expectedRevision=req.body?.revision;
   if(!Number.isSafeInteger(expectedRevision)||expectedRevision<1)throw fail(400,'Version de partie requise.');
   const c=await pool.connect();
@@ -141,6 +143,7 @@ tournamentQualificationRouter.post('/qualifications/:id/action',requireSession,r
     const next=playQualificationAction(row.state,{userId:req.userId,action:req.body?.action,square:req.body?.square});
     const result=await c.query(`UPDATE maf_tournament_qualification_matches SET state=$2::jsonb,revision=revision+1,updated_at=now()
       WHERE id=$1 RETURNING revision`,[id,JSON.stringify(next)]);
+    await recordWinnerForMatch(c,{...row,state:next});
     await c.query('COMMIT');res.json({state:playerView(next,req.userId),revision:result.rows[0].revision});
   }catch(e){await c.query('ROLLBACK').catch(()=>{});
     if(e.message?.includes('Ce joueur')||e.message?.includes('qualification')||e.message?.includes('Action')||
