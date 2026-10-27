@@ -3,6 +3,7 @@ import cors from "cors";
 import { walletRouter } from "./wallet.js";
 import { winPracticeRouter } from "./winPractice.js";
 import { tournamentsRouter } from "./tournaments.js";
+import { tournamentQualificationRouter, maintainQualificationStarts } from "./tournamentQualificationStart.js";
 import { tournamentCancellationRouter, maintainTournamentCancellations } from "./tournamentCancellation.js";
 import { pool } from "./db.js";
 import { authRouter } from "./auth.js";
@@ -54,6 +55,7 @@ app.use("/api/rooms", roomsRouter); // Salons et tir au but (etape 2)
 app.use("/api", walletRouter);
 app.use("/api/win-practice", winPracticeRouter);
 app.use("/api/tournaments", tournamentCancellationRouter);
+app.use("/api/tournaments", tournamentQualificationRouter);
 app.use("/api/tournaments", tournamentsRouter);
 app.use("/api/history", historyRouter);
 app.use("/api/owner", ownerNotificationsRouter);
@@ -81,3 +83,8 @@ void ensureMonopolyVoices().catch(error => console.error("monopoly voices setup:
 // Etape 3 : rattrapage des tournois incomplets apres demarrage ou reveil du serveur.
 setInterval(() => { void maintainTournamentCancellations().catch(error => console.error("tournament cancellations:",error.message)); }, 30000).unref();
 void maintainTournamentCancellations().catch(error => console.error("tournament cancellations setup:",error.message));
+
+// Etape 5 : rattrapage serveur, sans dependance a un onglet navigateur.
+// Le vrai lancement reste desactive tant que MAF_TOURNAMENT_REAL_START_ENABLED n'est pas 'true'.
+setInterval(() => { void maintainQualificationStarts().catch(e => console.error('tournament start:', e.message)); }, 30000).unref();
+void maintainQualificationStarts().catch(e => console.error('tournament start setup:', e.message));
