@@ -7,6 +7,7 @@ import { tournamentQualificationRouter, maintainQualificationStarts } from "./to
 import { tournamentFinalistsRouter, maintainFinalistArrivals } from "./tournamentFinalists.js";
 import { tournamentFinaleRouter, maintainFinaleStarts } from "./tournamentFinale.js";
 import { tournamentAwardsRouter } from "./tournamentAwards.js";
+import { tournamentSkinsRouter } from "./tournamentSkins.js";
 import { tournamentCancellationRouter, maintainTournamentCancellations } from "./tournamentCancellation.js";
 import { pool } from "./db.js";
 import { authRouter } from "./auth.js";
@@ -62,6 +63,7 @@ app.use("/api/tournaments", tournamentQualificationRouter);
 app.use("/api/tournaments", tournamentFinalistsRouter);
 app.use("/api/tournaments", tournamentFinaleRouter);
 app.use("/api/tournaments", tournamentAwardsRouter);
+app.use("/api/tournaments", tournamentSkinsRouter);
 app.use("/api/tournaments", tournamentsRouter);
 app.use("/api/history", historyRouter);
 app.use("/api/owner", ownerNotificationsRouter);
