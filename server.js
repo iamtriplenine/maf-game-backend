@@ -3,6 +3,7 @@ import cors from "cors";
 import { walletRouter } from "./wallet.js";
 import { winPracticeRouter } from "./winPractice.js";
 import { tournamentsRouter } from "./tournaments.js";
+import { tournamentCancellationRouter, maintainTournamentCancellations } from "./tournamentCancellation.js";
 import { pool } from "./db.js";
 import { authRouter } from "./auth.js";
 import { chatRouter } from "./chat.js";
@@ -52,6 +53,7 @@ app.use("/api/rooms", roomsRouter); // Salons et tir au but (etape 2)
 
 app.use("/api", walletRouter);
 app.use("/api/win-practice", winPracticeRouter);
+app.use("/api/tournaments", tournamentCancellationRouter);
 app.use("/api/tournaments", tournamentsRouter);
 app.use("/api/history", historyRouter);
 app.use("/api/owner", ownerNotificationsRouter);
@@ -75,3 +77,7 @@ setInterval(() => { void maintainMonopolyRooms().catch(error => console.error("m
 
 // Preparer les vocaux prives et leur suppression automatique a la fin d'un match.
 void ensureMonopolyVoices().catch(error => console.error("monopoly voices setup:", error.message));
+
+// Etape 3 : rattrapage des tournois incomplets apres demarrage ou reveil du serveur.
+setInterval(() => { void maintainTournamentCancellations().catch(error => console.error("tournament cancellations:",error.message)); }, 30000).unref();
+void maintainTournamentCancellations().catch(error => console.error("tournament cancellations setup:",error.message));

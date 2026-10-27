@@ -93,7 +93,7 @@ tournamentsRouter.get('/', run(async (req,res) => {
 }));
 tournamentsRouter.get('/owner', requireSession, run(async (req,res) => {
   await owner(req);
-  const { rows } = await pool.query(select + ' ORDER BY t.created_at DESC,t.id DESC LIMIT 100');
+  const { rows } = await pool.query(select + ' WHERE t.deleted_at IS NULL ORDER BY t.created_at DESC,t.id DESC LIMIT 100');
   res.json({ tournaments: rows.map(view), serverNow: Date.now() });
 }));
 tournamentsRouter.post('/owner', requireSession, run(async (req,res) => {
