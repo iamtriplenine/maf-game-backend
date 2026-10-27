@@ -5,6 +5,7 @@ import { winPracticeRouter } from "./winPractice.js";
 import { tournamentsRouter } from "./tournaments.js";
 import { tournamentQualificationRouter, maintainQualificationStarts } from "./tournamentQualificationStart.js";
 import { tournamentFinalistsRouter, maintainFinalistArrivals } from "./tournamentFinalists.js";
+import { tournamentFinaleRouter, maintainFinaleStarts } from "./tournamentFinale.js";
 import { tournamentCancellationRouter, maintainTournamentCancellations } from "./tournamentCancellation.js";
 import { pool } from "./db.js";
 import { authRouter } from "./auth.js";
@@ -58,6 +59,7 @@ app.use("/api/win-practice", winPracticeRouter);
 app.use("/api/tournaments", tournamentCancellationRouter);
 app.use("/api/tournaments", tournamentQualificationRouter);
 app.use("/api/tournaments", tournamentFinalistsRouter);
+app.use("/api/tournaments", tournamentFinaleRouter);
 app.use("/api/tournaments", tournamentsRouter);
 app.use("/api/history", historyRouter);
 app.use("/api/owner", ownerNotificationsRouter);
@@ -94,3 +96,7 @@ void maintainQualificationStarts().catch(e => console.error('tournament start se
 // Etape 6 : recuperation des gagnants enregistres apres une interruption.
 setInterval(() => { void maintainFinalistArrivals().catch(e => console.error('tournament finalists:',e.message)); },30000).unref();
 void maintainFinalistArrivals().catch(e => console.error('tournament finalists setup:',e.message));
+
+// Etape 7 : maintenance serveur, aucun depart reel par defaut.
+setInterval(() => { void maintainFinaleStarts().catch(e => console.error('finale maintenance:',e.message)); },30000).unref();
+void maintainFinaleStarts().catch(e => console.error('finale setup:',e.message));
