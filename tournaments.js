@@ -2,6 +2,7 @@
 import { Router } from 'express';
 import { pool } from './db.js';
 import { ensureTable, requireSession } from './auth.js';
+import { ensureReservationTables, mountReservations } from './tournamentReservations.js'; // MAF_TOURNOI_ETAPE2_V1
 export const tournamentsRouter = Router();
 const fail = (status, message) => Object.assign(new Error(message), { status });
 const run = fn => async (req, res, next) => {
@@ -37,6 +38,7 @@ export function ensureTournaments() {
         status text NOT NULL CHECK(status IN ('reserved','refunded')),
         created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(tournament_id,user_id)
       )`);
+      await ensureReservationTables(client);
       await client.query('COMMIT');
     } catch (e) { await client.query('ROLLBACK'); throw e; }
     finally { client.release(); }
@@ -45,11 +47,12 @@ export function ensureTournaments() {
 }
 const select = `SELECT t.*, (SELECT count(*)::int FROM maf_tournament_entries e
   WHERE e.tournament_id=t.id AND e.status='reserved') AS registered FROM maf_tournaments t`;
+const registrationIsOpen = row => row.status === 'published' && row.registration_open === true && Date.parse(row.starts_at) > Date.now();
 function view(row) {
   return { id: row.id, game: row.game, title: row.title, description: row.description,
     startsAt: new Date(row.starts_at).toISOString(), finalAt: new Date(row.final_at).toISOString(),
     status: row.status, capacity: row.capacity, entryFee: row.entry_fee,
-    registered: Number(row.registered || 0), revision: row.revision, registrationOpen: false,
+    registered: Number(row.registered || 0), revision: row.revision, registrationOpen: registrationIsOpen(row), full: Number(row.registered || 0) >= row.capacity,
     rewards: { real: [2000, 1600, 1500, 1400], eliminatedReal: 62.5, bonusEach: 100,
       participantSkins: 1, finalistSkins: 2 } };
 }
@@ -83,6 +86,7 @@ async function owner(req) {
 tournamentsRouter.use((req,res,next) => { res.set('Cache-Control','no-store'); next(); });
 // Initialisation paresseuse : l'indisponibilite des tournois ne bloque pas les autres jeux.
 tournamentsRouter.use((req,res,next) => ensureTournaments().then(() => next()).catch(next));
+mountReservations(tournamentsRouter, { select, view, fail, run, owner });
 tournamentsRouter.get('/', run(async (req,res) => {
   const { rows } = await pool.query(select + " WHERE t.status='published' ORDER BY t.starts_at,t.id");
   res.json({ tournaments: rows.map(view), serverNow: Date.now() });
