@@ -34,6 +34,8 @@ export function ensureTournamentDuels(){
     winner_id integer REFERENCES maf_users(id), started_at timestamptz, ended_at timestamptz,
     paid_at timestamptz, created_by integer NOT NULL REFERENCES maf_users(id),
     created_at timestamptz NOT NULL DEFAULT now(), CHECK(gifts_at>starts_at))`);
+   // MAF_DUEL_ARCHIVE_V1 : conserver les opérations, masquer seulement l'annonce.
+   await c.query(`ALTER TABLE maf_monopoly_duels ADD COLUMN IF NOT EXISTS hidden_at timestamptz`);
    await c.query(`CREATE TABLE IF NOT EXISTS maf_monopoly_duel_entries (
     duel_id bigint NOT NULL REFERENCES maf_monopoly_duels(id), user_id integer NOT NULL REFERENCES maf_users(id),
     status text NOT NULL CHECK(status IN ('reserved','refunded')), created_at timestamptz NOT NULL DEFAULT now(),
@@ -150,11 +152,11 @@ const select=`SELECT d.*,(SELECT count(*)::int FROM maf_monopoly_duel_entries e
  WHERE e.duel_id=d.id AND e.status='reserved') AS registered FROM maf_monopoly_duels d`;
 tournamentDuelRouter.use((req,res,next)=>{res.set('Cache-Control','no-store');ensureTournamentDuels().then(()=>next(),next);});
 tournamentDuelRouter.get('/',wrap(async(req,res)=>{
- const rows=(await pool.query(select+" WHERE d.status <> 'draft' ORDER BY d.starts_at DESC LIMIT 40")).rows;
+ const rows=(await pool.query(select+" WHERE d.status <> 'draft' AND d.hidden_at IS NULL ORDER BY d.starts_at DESC LIMIT 40")).rows;
  res.json({duels:rows.map(x=>view(x,x.registered)),serverNow:Date.now()});
 }));
 tournamentDuelRouter.get('/owner',requireSession,wrap(async(req,res)=>{
- await owner(req.userId);const rows=(await pool.query(select+' ORDER BY d.created_at DESC LIMIT 50')).rows;
+ await owner(req.userId);const rows=(await pool.query(select+' WHERE d.hidden_at IS NULL ORDER BY d.created_at DESC LIMIT 50')).rows;
  res.json({duels:rows.map(x=>view(x,x.registered)),serverNow:Date.now()});
 }));
 tournamentDuelRouter.post('/owner',requireSession,wrap(async(req,res)=>{
@@ -188,6 +190,29 @@ tournamentDuelRouter.put('/owner/:id',requireSession,wrap(async(req,res)=>{
     revision=revision+1 WHERE id=$1 RETURNING *`,[id,b.title.trim(),times.startsAt,times.giftsAt,b.status])).rows[0];
   await c.query('COMMIT');res.json({duel:view(result,0)});
  }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
+}));
+// Retrait logique : l'historique, les inscriptions, les cadeaux et les versements restent intacts.
+tournamentDuelRouter.post('/owner/:id/archive',requireSession,wrap(async(req,res)=>{
+ await owner(req.userId);
+ const id=idOf(req.params.id),c=await pool.connect();
+ try {
+  await c.query('BEGIN');
+  const d=(await c.query('SELECT * FROM maf_monopoly_duels WHERE id=$1 FOR UPDATE',[id])).rows[0];
+  if(!d)throw fail(404,'Duel introuvable.');
+  if(d.hidden_at){await c.query('COMMIT');return res.json({archived:true,alreadyArchived:true});}
+  if(!['draft','finished','paid','cancelled'].includes(d.status))
+   throw fail(409,'Le duel est encore actif. Annule-le avant son depart ou termine la partie.');
+  if(d.status==='draft'){
+   const entries=(await c.query('SELECT 1 FROM maf_monopoly_duel_entries WHERE duel_id=$1 LIMIT 1',[id])).rowCount;
+   if(entries)throw fail(409,'Un brouillon avec une inscription ne peut pas etre masque.');
+  }
+  // Une finale terminee peut être masquée avant son versement; la maintenance
+  // parcourt encore les duels « finished » et credite a gifts_at comme auparavant.
+  await c.query('UPDATE maf_monopoly_duels SET hidden_at=now(),revision=revision+1 WHERE id=$1',[id]);
+  await audit(c,'duel_archived',{duelId:id,status:d.status});
+  await c.query('COMMIT');
+  res.json({archived:true,financialHistoryPreserved:true,payoutPending:d.status==='finished'});
+ } catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
 }));
 tournamentDuelRouter.post('/owner/:id/cancel',requireSession,wrap(async(req,res)=>{
  await owner(req.userId);
