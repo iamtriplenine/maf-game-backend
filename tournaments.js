@@ -4,6 +4,7 @@ import { PUBLIC_REWARD_SCENARIOS } from './tournamentPublicRewards.js';
 import { publicTournamentBookingsEnabled } from './tournamentLaunchPolicy.js';
 import { pool } from './db.js';
 import { tournamentReference } from './tournamentMatchReferences.js';
+import { STUDIO_SKINS, selectedTournamentSkin, studioSkin } from './studioSkinCatalog.js';
 import { ensureTable, requireSession } from './auth.js';
 import { ensureReservationTables, mountReservations } from './tournamentReservations.js'; // MAF_TOURNOI_ETAPE2_V1
 export const tournamentsRouter = Router();
@@ -41,6 +42,9 @@ export function ensureTournaments() {
         status text NOT NULL CHECK(status IN ('reserved','refunded')),
         created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(tournament_id,user_id)
       )`);
+      await client.query(`ALTER TABLE maf_tournaments
+        ADD COLUMN IF NOT EXISTS participant_skin_id text,
+        ADD COLUMN IF NOT EXISTS winner_skin_id text`);
       await ensureReservationTables(client);
       await client.query('COMMIT');
     } catch (e) { await client.query('ROLLBACK'); throw e; }
@@ -57,6 +61,9 @@ function view(row) {
     status: row.status, capacity: row.capacity, entryFee: row.entry_fee,
     registered: Number(row.registered || 0), revision: row.revision, registrationOpen: registrationIsOpen(row),
     publicBookingsEnabled: publicTournamentBookingsEnabled(), registrationConfigured: row.registration_open === true, full: Number(row.registered || 0) >= row.capacity,
+    participantSkinId: row.participant_skin_id || null, winnerSkinId: row.winner_skin_id || null,
+    participantSkinName: studioSkin(row.participant_skin_id)?.name || null,
+    winnerSkinName: studioSkin(row.winner_skin_id)?.name || null,
     rewardScenarios: PUBLIC_REWARD_SCENARIOS,
     rewards: { real: [2000, 1600, 1500, 1400], eliminatedReal: 62.5, bonusEach: 100,
       participantSkins: 1, finalistSkins: 2 } };
@@ -82,7 +89,13 @@ function input(body) {
   // Les montants et capacites ne peuvent pas etre remplaces par le navigateur.
   if (['capacity','entryFee','registered','rewards','registrationOpen','game'].some(k => k in body))
     throw fail(400, 'Le format Monopoly est fixé à 20 places et 500 F.');
-  return [title, description, new Date(dates[0]).toISOString(), new Date(dates[1]).toISOString(), body.status];
+  let participantSkinId, winnerSkinId;
+  try {
+    participantSkinId=selectedTournamentSkin(body.participantSkinId);
+    winnerSkinId=selectedTournamentSkin(body.winnerSkinId);
+  } catch (error) { throw fail(400,error.message); }
+  return [title, description, new Date(dates[0]).toISOString(), new Date(dates[1]).toISOString(), body.status,
+    participantSkinId, winnerSkinId];
 }
 async function owner(req) {
   const { rows } = await pool.query('SELECT pseudo_key FROM maf_users WHERE id=$1', [req.userId]);
@@ -92,6 +105,10 @@ tournamentsRouter.use((req,res,next) => { res.set('Cache-Control','no-store'); n
 // Initialisation paresseuse : l'indisponibilite des tournois ne bloque pas les autres jeux.
 tournamentsRouter.use((req,res,next) => ensureTournaments().then(() => next()).catch(next));
 mountReservations(tournamentsRouter, { select, view, fail, run, owner });
+// Liste publique des identifiants et de leur statut, sans données de compte.
+tournamentsRouter.get('/skins/catalog', run(async (_req,res) => {
+  res.json({skins:STUDIO_SKINS});
+}));
 tournamentsRouter.get('/', run(async (req,res) => {
   const { rows } = await pool.query(select + " WHERE t.status='published' AND t.deleted_at IS NULL AND t.cancelled_at IS NULL ORDER BY t.starts_at,t.id");
   // Seuls les pseudos publics : jamais d'ID interne, de solde ou de donnees de profil.
@@ -111,8 +128,9 @@ tournamentsRouter.get('/owner', requireSession, run(async (req,res) => {
 tournamentsRouter.post('/owner', requireSession, run(async (req,res) => {
   await owner(req);
   const values = input(req.body);
-  const { rows } = await pool.query(`INSERT INTO maf_tournaments(title,description,starts_at,final_at,status,creator_id)
-    VALUES($1,$2,$3,$4,$5,$6) RETURNING *`, [...values, req.userId]);
+  const { rows } = await pool.query(`INSERT INTO maf_tournaments
+    (title,description,starts_at,final_at,status,participant_skin_id,winner_skin_id,creator_id)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`, [...values, req.userId]);
   res.status(201).json({ tournament: view(rows[0]), serverNow: Date.now() });
 }));
 tournamentsRouter.put('/owner/:id', requireSession, run(async (req,res) => {
@@ -130,7 +148,7 @@ tournamentsRouter.put('/owner/:id', requireSession, run(async (req,res) => {
     if (row.revision !== revision) throw fail(409, 'Ce tournoi a été modifié ailleurs. Recharge la liste avant de réessayer.');
     if (Number(row.registered) > 0) throw fail(409, 'Ce tournoi comporte des réservations : modification bloquée.');
     const updated = await client.query(`UPDATE maf_tournaments SET title=$1,description=$2,starts_at=$3,
-      final_at=$4,status=$5,revision=revision+1,updated_at=now() WHERE id=$6 RETURNING *`, [...values,id]);
+      final_at=$4,status=$5,participant_skin_id=$6,winner_skin_id=$7,revision=revision+1,updated_at=now() WHERE id=$8 RETURNING *`, [...values,id]);
     await client.query('COMMIT');
     res.json({ tournament: view(updated.rows[0]), serverNow: Date.now() });
   } catch (e) { await client.query('ROLLBACK'); throw e; }

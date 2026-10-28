@@ -8,6 +8,7 @@ import { ensureWallet } from './wallet.js';
 import { ensureFinaleTables } from './tournamentFinale.js';
 import { ensureTournamentSkinTables } from './tournamentSkins.js';
 import { buildTournamentSkinPlan } from './tournamentSkinRules.js';
+import { selectedSkinGrants } from './studioSkinCatalog.js';
 import { payoutPlan } from './tournamentPayoutRules.js';
 import { certifiedFinalOrder, francText } from './tournamentAwardRules.js';
 import { finalistFromMatch } from './tournamentFinalistRules.js';
@@ -164,6 +165,12 @@ export async function settleCertifiedTournamentAwards(tournamentId) {
       WHERE tournament_id=$1 ORDER BY user_id,skin_kind FOR UPDATE`,[id])).rows;
     if(rights.length!==skins.length || rights.some(x=>!skins.some(s=>s.userId===Number(x.user_id)&&s.kind===x.skin_kind)))
       throw fail(409,'Droits de skins incoherents.');
+    // Les nouveaux skins exclusifs sont attribues avec les memes garanties
+    // transactionnelles que les francs : aucun gain partiel et aucun doublon.
+    const skinGrants=selectedSkinGrants(plan.lines,t.participant_skin_id,t.winner_skin_id);
+    for (const g of skinGrants) await c.query(`INSERT INTO maf_studio_skin_unlocks
+      (user_id,skin_id,tournament_id,prize_kind) VALUES($1,$2,$3,$4)
+      ON CONFLICT(user_id,skin_id) DO NOTHING`,[g.userId,g.skinId,id,g.kind]);
     // Les utilisateurs sont toujours verrouilles dans le meme ordre pour limiter les deadlocks.
     for(const l of [...plan.lines].sort((a,b)=>a.userId-b.userId)) {
       const result=await walletLimitQuery(c,l.userId,l.realFranc,l.bonusFranc);

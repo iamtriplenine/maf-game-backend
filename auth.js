@@ -1,5 +1,6 @@
 // Comptes MAF : pseudo + code a 10 chiffres (pas de mot de passe).
 // Routes : POST /api/register, POST /api/login, GET /api/me
+import { studioSkin } from './studioSkinCatalog.js';
 import crypto from "node:crypto";
 import { promisify } from "node:util";
 import { Router } from "express";
@@ -198,15 +199,21 @@ export function requireSession(req, res, next) {
   next();
 }
 
-// Le catalogue est actuellement gratuit. Validation cote serveur pour eviter
-// d'enregistrer un chemin de modele arbitraire.
-const ALLOWED_SKINS = new Set(["loki", "bailarina", "samba", "messi", "mutant-swipe", "mutant-run", "mutant-attack", "kushina"]);
+// Catalogue Studio 3D : les skins actuels restent publics. Les futurs exclusifs
+// doivent appartenir au compte avant de pouvoir etre equipes.
+const LEGACY_SKIN_IDS = { 'mutant-run':'mutant-swipe', 'mutant-attack':'mutant-swipe' };
 authRouter.patch("/skin", requireSession, async (req, res) => {
-  const skinId = req.body?.skin_id;
-  if (typeof skinId !== "string" || !ALLOWED_SKINS.has(skinId)) {
-    return fail(res, 400, "Skin inconnu.");
-  }
+  const requested = req.body?.skin_id;
+  const skinId = LEGACY_SKIN_IDS[requested] || requested;
+  const entry = typeof skinId==='string' ? studioSkin(skinId) : null;
+  if (!entry) return fail(res, 400, 'Skin inconnu.');
   try {
+    if(entry.access==='exclusive') {
+      // Cette table est creee au lancement du module tournoi, et non par le client.
+      const owned=await pool.query(`SELECT 1 FROM maf_studio_skin_unlocks
+        WHERE user_id=$1 AND skin_id=$2 LIMIT 1`,[req.userId,skinId]);
+      if(!owned.rowCount)return fail(res,403,'Ce skin est reserve aux gagnants et participants recompenses.');
+    }
     const result = await pool.query(
       "update maf_users set skin_id = $1 where id = $2 returning *",
       [skinId, req.userId]

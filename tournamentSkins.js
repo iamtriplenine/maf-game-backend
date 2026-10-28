@@ -6,6 +6,7 @@ import { requireSession } from './auth.js';
 import { ensureTournamentAwardTables } from './tournamentAwards.js';
 import { buildTournamentAwardPlan } from './tournamentAwardRules.js';
 import { buildTournamentSkinPlan, resultAnimationSteps } from './tournamentSkinRules.js';
+import { STUDIO_SKINS, studioSkin } from './studioSkinCatalog.js';
 
 export const tournamentSkinsRouter = Router();
 const fail=(status,message)=>Object.assign(new Error(message),{status});
@@ -30,6 +31,14 @@ export function ensureTournamentSkinTables(){
         status text NOT NULL DEFAULT 'prepared' CHECK(status IN ('prepared','granted')),
         created_at timestamptz NOT NULL DEFAULT now(), granted_at timestamptz,
         PRIMARY KEY(tournament_id,user_id,skin_kind)
+      )`);
+      await c.query(`CREATE TABLE IF NOT EXISTS maf_studio_skin_unlocks (
+        user_id integer NOT NULL REFERENCES maf_users(id),
+        skin_id text NOT NULL,
+        tournament_id integer NOT NULL REFERENCES maf_tournaments(id),
+        prize_kind text NOT NULL CHECK(prize_kind IN ('participation','winner')),
+        created_at timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY(user_id,skin_id)
       )`);
       await c.query('COMMIT');
     } catch(e) {await c.query('ROLLBACK').catch(()=>{});throw e;}
@@ -78,6 +87,12 @@ export async function prepareTournamentSkinEntitlements(tournamentId){
 }
 
 tournamentSkinsRouter.use((_,res,next)=>{res.set('Cache-Control','private, no-store');next();});
+// L'acces aux skins exclusifs est determine par le serveur, jamais par le navigateur.
+tournamentSkinsRouter.get('/skins/mine',requireSession,handler(async(req,res)=>{
+  await ensureTournamentSkinTables();
+  const {rows}=await pool.query(`SELECT skin_id FROM maf_studio_skin_unlocks WHERE user_id=$1`,[req.userId]);
+  res.json({unlocked:rows.map(r=>r.skin_id).filter(id=>studioSkin(id)?.access==='exclusive')});
+}));
 tournamentSkinsRouter.post('/skins/owner/preview',requireSession,handler(async(req,res)=>{
   await owner(req);
   const awardPlan=buildTournamentAwardPlan(Array.from({length:20},(_,i)=>i+1),[1,2,3,4]);

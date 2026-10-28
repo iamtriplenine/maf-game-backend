@@ -6,6 +6,8 @@ import { requireSession } from './auth.js';
 import { ensureTournamentAwardTables } from './tournamentAwards.js';
 import { ownerDemoGift, rewardAvailability, validateReleaseAt } from './tournamentGiftRules.js';
 import { postponedGiftAt } from './tournamentLiveRules.js';
+import { studioSkin } from './studioSkinCatalog.js';
+import { ensureTournamentSkinTables } from './tournamentSkins.js';
 
 export const tournamentGiftRouter = Router();
 const problem=(status,message)=>Object.assign(new Error(message),{status});
@@ -27,7 +29,7 @@ async function ensureOwner(userId){
 let ready;
 export function ensureTournamentGifts(){
   if(!ready)ready=(async()=>{
-    await ensureTournamentAwardTables();
+    await ensureTournamentAwardTables();await ensureTournamentSkinTables();
     const c=await pool.connect();
     try{
       await c.query('BEGIN');
@@ -109,22 +111,29 @@ function output(row,now){
   const credited= row.batch_status==='credited' && row.award_status==='credited';
   const status=rewardAvailability({releaseAt,now,participantReserved:row.entry_status==='reserved',
     batchCredited:row.batch_status==='credited',awardCredited:row.award_status==='credited',openedAt});
+  const chosen=[];
+  if(row.participant_skin_id)chosen.push({id:row.participant_skin_id,name:studioSkin(row.participant_skin_id)?.name||row.participant_skin_id,unlocked:!!row.participant_skin_unlocked});
+  if(row.place===1 && row.winner_skin_id)chosen.push({id:row.winner_skin_id,name:studioSkin(row.winner_skin_id)?.name||row.winner_skin_id,unlocked:!!row.winner_skin_unlocked});
   return {
     tournamentId:Number(row.id),title:row.title,releaseAt,status,openedAt,
     // Ne jamais reveler de gains prepares ou des informations d'autres comptes.
     ...(credited && ['ready','opened'].includes(status)?{
       reward:{ place:row.place===null?null:Number(row.place),realCents:Number(row.real_franc)*100,realFranc:Number(row.real_franc),
         bonusCents:Number(row.bonus_franc)*100,bonusFranc:Number(row.bonus_franc),skinsPlanned:row.place===null?1:2,
-        skinsDelivered:false }
+        skinsDelivered:chosen.length>0&&chosen.every(s=>s.unlocked),chosenSkins:chosen }
     }:{}),
   };
 }
 const itemSql=`SELECT t.id,t.title,e.status AS entry_status,g.release_at,o.opened_at,
+  t.participant_skin_id,t.winner_skin_id,
+  pu.skin_id AS participant_skin_unlocked,wu.skin_id AS winner_skin_unlocked,
   a.place,a.real_cents,a.bonus_cents,a.real_franc,a.bonus_franc,a.status AS award_status,b.status AS batch_status
   FROM maf_tournament_entries e
   JOIN maf_tournaments t ON t.id=e.tournament_id
   LEFT JOIN maf_tournament_gift_schedule g ON g.tournament_id=t.id
   LEFT JOIN maf_tournament_gift_openings o ON o.tournament_id=t.id AND o.user_id=e.user_id
+  LEFT JOIN maf_studio_skin_unlocks pu ON pu.user_id=e.user_id AND pu.skin_id=t.participant_skin_id
+  LEFT JOIN maf_studio_skin_unlocks wu ON wu.user_id=e.user_id AND wu.skin_id=t.winner_skin_id
   LEFT JOIN maf_tournament_award_lines a ON a.tournament_id=t.id AND a.user_id=e.user_id
   LEFT JOIN maf_tournament_award_batches b ON b.tournament_id=t.id
   WHERE e.user_id=$1 AND e.status='reserved'`;
