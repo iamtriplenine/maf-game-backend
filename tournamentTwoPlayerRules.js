@@ -1,59 +1,62 @@
-// Regles pures du format special a deux joueurs. Aucun mouvement d'argent.
-// IMPORTANT : ce module n'est pas branche aux routes publiques / au portefeuille.
-export const DUEL_PLAYERS = 2;
-export const DUEL_ENTRY_CENTS = 50_000; // 500 F CFA
+// MAF Monopoly : regles PUREs du duel programme (sans route publique ni ecriture de solde).
+// IMPORTANT : les versements doivent venir d'une transaction serveur apres un resultat certifie.
+// La mise de 500 F est comprise dans les 900/100 F. AUCUN bonus monetaire supplementaire.
+export const DUEL_CAPACITY = 2;
+export const DUEL_STAKE_CENTS = 50_000;
+export const DUEL_PRIZES_CENTS = Object.freeze([90_000, 10_000]);
+export const DUEL_PARTICIPATION_BONUS_CENTS = 0;
+export const DUEL_ORGANIZER_REMAINDER_CENTS = 0;
 
-const amount = (v, label) => {
-  if (!Number.isSafeInteger(v) || v < 0) throw new Error(`${label} doit etre un montant positif en centimes entiers.`);
-  return v;
-};
-const date = (v, label) => {
-  if (typeof v !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/.test(v))
-    throw new Error(`${label} doit etre une date UTC ISO complete.`);
-  const d = Date.parse(v);
-  if (!Number.isFinite(d) || new Date(d).toISOString().slice(0,19) !== v.slice(0,19))
+const assertId = n => Number.isSafeInteger(n) && n > 0;
+function validIso(value, label) {
+  if (typeof value !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/.test(value))
+    throw new Error(`${label} : UTC ISO obligatoire.`);
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString().slice(0,19)!==value.slice(0,19))
     throw new Error(`${label} invalide.`);
-  return d;
-};
-
-// Une partie unique, deja finale; deux comptes distincts, sans joueurs fictifs.
-export function validateDuelSchedule({userIds, startsAt, giftsAt, now = Date.now()}) {
-  if (!Array.isArray(userIds) || userIds.length !== 2 ||
-      userIds.some(id => !Number.isSafeInteger(id) || id < 1) || userIds[0] === userIds[1])
-    throw new Error('Le duel exige exactement deux comptes reels differents.');
-  const startsMs = date(startsAt, 'Heure de la partie');
-  const giftsMs = date(giftsAt, 'Heure des cadeaux');
-  if (startsMs <= now) throw new Error('Le depart doit etre programme dans le futur.');
-  if (giftsMs < startsMs) throw new Error('La remise des cadeaux ne peut pas preceder la partie.');
-  return {format: 'duel', players: 2, boards: [{number:1,seats:2}], finalSeats:2,
-    qualificationRound:false, startsAt, finalAt:startsAt, giftsAt};
+  return timestamp;
 }
 
-// Budget de CONTROLE UNIQUEMENT. Aucun solde, bonus ou cadeau n'est credite.
-// Le sens de « benefice » et du « cadeau 1 100 F » doit etre confirme par le proprietaire.
-export function duelFinancingPreview({
-  feeCents = DUEL_ENTRY_CENTS,
-  firstProfitCents = 10_000,
-  secondProfitCents = 10_000,
-  giftCents = 110_000,
-  alsoReturnEntryFees = false,
-  sponsorCents = 0,
-  reserveCents = 0,
-} = {}) {
-  feeCents=amount(feeCents,'Mise');
-  firstProfitCents=amount(firstProfitCents,'Benefice du premier');
-  secondProfitCents=amount(secondProfitCents,'Benefice du deuxieme');
-  giftCents=amount(giftCents,'Cadeau');
-  sponsorCents=amount(sponsorCents,'Financement externe');
-  reserveCents=amount(reserveCents,'Reserve organisateur');
-  const receiptsCents = 2 * feeCents;
-  const obligationCents = firstProfitCents + secondProfitCents + giftCents +
-    (alsoReturnEntryFees ? receiptsCents : 0) + reserveCents;
-  const availableCents = receiptsCents + sponsorCents;
-  const shortfallCents = Math.max(0, obligationCents - availableCents);
-  return {
-    receiptsCents, obligationCents, availableCents, shortfallCents,
-    financed: shortfallCents === 0,
-    status: shortfallCents ? 'BLOCKED_INSUFFICIENT_FUNDING' : 'BUDGET_SUFFICIENT_NOT_AUTHORIZED_TO_PAY',
-  };
+// L'organisateur programme l'annonce AVANT les reservations; aucun ID joueur requis ici.
+export function validateDuelSchedule({startsAt,giftsAt,now=Date.now()}={}) {
+  const starts=validIso(startsAt,'Depart'), gifts=validIso(giftsAt,'Cadeaux');
+  if (!Number.isFinite(now) || starts<=now) throw new Error('La partie doit etre programmee dans le futur.');
+  if (gifts<=starts) throw new Error('Les cadeaux doivent etre programmes apres le depart.');
+  return Object.freeze({format:'monopoly_duel_2',capacity:2,feeCents:DUEL_STAKE_CENTS,
+    startsAt,finalAt:startsAt,giftsAt,qualifications:0,gameCount:1,finalists:2});
+}
+
+// La finale est la SEULE partie. Pas de tirage par plateaux et pas de joueur fictif.
+export function assertDuelParticipants(userIds) {
+  if (!Array.isArray(userIds) || userIds.length!==2 || !userIds.every(assertId) ||
+      new Set(userIds).size!==2)
+    throw new Error('Deux comptes distincts ayant une reservation confirmee sont requis.');
+  return [...userIds];
+}
+
+export function duelBudgetPreview({userIds,winnerId}={}) {
+  const players=assertDuelParticipants(userIds);
+  if (!assertId(winnerId)||!players.includes(winnerId)) throw new Error('Gagnant non admissible.');
+  const secondId=players.find(id=>id!==winnerId);
+  const stakesCents=DUEL_CAPACITY*DUEL_STAKE_CENTS;
+  const lines=[
+    {userId:winnerId,place:1,realCents:DUEL_PRIZES_CENTS[0],bonusCents:0,skinsPlanned:2},
+    {userId:secondId,place:2,realCents:DUEL_PRIZES_CENTS[1],bonusCents:0,skinsPlanned:2},
+  ];
+  const payoutCents=lines.reduce((n,l)=>n+l.realCents+l.bonusCents,0);
+  if (payoutCents!==stakesCents) throw new Error('Budget non equilibre.');
+  return {format:'monopoly_duel_2',registered:2,stakesCents,payoutCents,remainingCents:0,
+    bonusCents:0,lines,paymentsEnabled:false,skinsAttributed:false,
+    note:'Calcul uniquement. Interdit de crediter un solde ou de declarer un skin attribue.'};
+}
+
+// Le controle ne doit pas ouvrir un duel incomplet ou payer deux fois.
+export function duelReadiness({confirmedUserIds,now,startsAt,settled=false}={}) {
+  const start=validIso(startsAt,'Depart');
+  if (!Number.isFinite(now)) throw new Error('Horloge invalide.');
+  if (settled) return {status:'settled',canStart:false};
+  if (now<start) return {status:'scheduled',canStart:false};
+  if (!Array.isArray(confirmedUserIds) || confirmedUserIds.length!==2) return {status:'cancel_and_refund',canStart:false};
+  assertDuelParticipants(confirmedUserIds);
+  return {status:'ready',canStart:true};
 }
