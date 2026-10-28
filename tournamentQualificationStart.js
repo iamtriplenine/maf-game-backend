@@ -14,6 +14,7 @@ import { tickTurnClock, normalizeTurnClock } from './monopolyTurnClock.js';
 import { lobbyDeadline, lobbyOutcome, launchWithAbsences } from './tournamentLiveRules.js';
 import { privateMatchView } from './tournamentPrivateView.js';
 import { ensureFinaleTables } from './tournamentFinale.js';
+import { qualificationReference, tournamentReference } from './tournamentMatchReferences.js';
 
 export const tournamentQualificationRouter = Router();
 export const realQualificationEnabled = () => process.env.MAF_TOURNAMENT_REAL_START_ENABLED === 'true';
@@ -160,9 +161,9 @@ tournamentQualificationRouter.post('/qualifications/owner/preview',requireSessio
 tournamentQualificationRouter.get('/qualifications/owner/:id',requireSession,route(async(req,res)=>{
   await checkOwner(req);await ensureQualificationTables();
   const tournamentId=numericId(req.params.id);
-  const result=await pool.query(`SELECT table_no,revision,started_at,state FROM maf_tournament_qualification_matches
+  const result=await pool.query(`SELECT id,table_no,revision,started_at,state FROM maf_tournament_qualification_matches
     WHERE tournament_id=$1 ORDER BY table_no`,[tournamentId]);
-  res.json({tournamentId,groups:result.rows.map(r=>({table:r.table_no,revision:r.revision,
+  res.json({tournamentId,tournamentReference:tournamentReference(tournamentId),groups:result.rows.map(r=>({table:r.table_no,reference:qualificationReference(tournamentId,r.table_no,r.id),revision:r.revision,
     startedAt:r.started_at,players:r.state.seats.map(p=>({name:p.name,seat:p.seat,userId:p.userId}))})),
     realStartEnabled:realQualificationEnabled()});
 }));
@@ -180,7 +181,7 @@ tournamentQualificationRouter.get('/qualifications/mine',requireSession,route(as
   if(!found)return res.json({match:null,enabled:true,serverNow:Date.now()});
   const joined=(await pool.query(`SELECT user_id FROM maf_tournament_qualification_presence
     WHERE match_id=$1 AND last_seen_at>=now()-interval '20 seconds'`,[found.id])).rows.map(r=>Number(r.user_id));
-  res.json({match:{id:Number(found.id),tournamentId:Number(found.tournament_id),title:found.title,
+  res.json({match:{id:Number(found.id),reference:qualificationReference(found.tournament_id,found.table_no,found.id),tournamentReference:tournamentReference(found.tournament_id),tournamentId:Number(found.tournament_id),title:found.title,
     table:Number(found.table_no),revision:found.revision,state:playerView(found.state,req.userId),
     lobbyStatus:found.lobby_status,joinedCount:joined.length,totalCount:found.state.seats.length,
     waitingFor:found.state.seats.filter(p=>!joined.includes(Number(p.userId))).map(p=>p.name),

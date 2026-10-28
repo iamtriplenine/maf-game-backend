@@ -3,6 +3,7 @@ import { Router } from 'express';
 import { PUBLIC_REWARD_SCENARIOS } from './tournamentPublicRewards.js';
 import { publicTournamentBookingsEnabled } from './tournamentLaunchPolicy.js';
 import { pool } from './db.js';
+import { tournamentReference } from './tournamentMatchReferences.js';
 import { ensureTable, requireSession } from './auth.js';
 import { ensureReservationTables, mountReservations } from './tournamentReservations.js'; // MAF_TOURNOI_ETAPE2_V1
 export const tournamentsRouter = Router();
@@ -51,7 +52,7 @@ const select = `SELECT t.*, (SELECT count(*)::int FROM maf_tournament_entries e
   WHERE e.tournament_id=t.id AND e.status='reserved') AS registered FROM maf_tournaments t`;
 const registrationIsOpen = row => publicTournamentBookingsEnabled() && row.status === 'published' && row.registration_open === true && Date.parse(row.starts_at) > Date.now();
 function view(row) {
-  return { id: row.id, game: row.game, title: row.title, description: row.description,
+  return { id: row.id, reference: tournamentReference(row.id), game: row.game, title: row.title, description: row.description,
     startsAt: new Date(row.starts_at).toISOString(), finalAt: new Date(row.final_at).toISOString(),
     status: row.status, capacity: row.capacity, entryFee: row.entry_fee,
     registered: Number(row.registered || 0), revision: row.revision, registrationOpen: registrationIsOpen(row),

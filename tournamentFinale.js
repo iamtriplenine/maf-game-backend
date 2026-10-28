@@ -1,4 +1,5 @@
 import { captureFinalCertification } from './tournamentFinalCertification.js';
+import { finaleReference, tournamentReference } from './tournamentMatchReferences.js';
 // Etape 7 : orchestration de la finale. Demonstration owner en lecture seule.
 // Le jeu reel exige qualification activee et presence des 2 a 4 finalistes.
 import { Router } from 'express';
@@ -69,7 +70,7 @@ function projectedStatus(t, matches, finalists, schedule, finalMatch, now, expec
   const projection=finalePreview({finalAt:t.final_at,now,qualifiedCount:Math.min(4,count),
     qualificationsComplete:complete,started:!!finalMatch,expectedFinalists:expectedCount});
   return {
-    tournamentId:Number(t.id),title:t.title,plannedAt:new Date(t.final_at).toISOString(),
+    tournamentId:Number(t.id),reference:finaleReference(t.id),tournamentReference:tournamentReference(t.id),title:t.title,plannedAt:new Date(t.final_at).toISOString(),
     nextAt:schedule ? (schedule.status==='started'?null:new Date(schedule.next_start_at).toISOString()):projection.nextAt,
     status:finalMatch?'started':schedule?.status==='pending'?'waiting':projection.status,
     expectedFinalists:expectedCount,
@@ -218,7 +219,7 @@ tournamentFinaleRouter.get('/qualifications/finale/mine',requireSession,handler(
   const expectedRows=(await pool.query(`SELECT count(*)::int AS count FROM maf_tournament_qualification_matches
     WHERE tournament_id=$1`,[row.id])).rows;
   const live=(await pool.query(`SELECT state,revision,started_at FROM maf_tournament_final_matches WHERE tournament_id=$1`,[row.id])).rows[0];
-  res.json({finale:{tournamentId:Number(row.id),title:row.title,qualified:true,
+  res.json({finale:{tournamentId:Number(row.id),reference:finaleReference(row.id),tournamentReference:tournamentReference(row.id),title:row.title,qualified:true,
     plannedAt:new Date(row.final_at).toISOString(),nextAt:live?null:new Date(row.next_start_at||row.final_at).toISOString(),
     status:live?(live.state.game.phase==='over'?'finished':'playing'):'waiting',
     finalistCount:roster.length,expectedFinalists:Number(expectedRows[0].count),
