@@ -3,6 +3,7 @@ import cors from "cors";
 import { walletRouter } from "./wallet.js";
 import { winPracticeRouter } from "./winPractice.js";
 import { tournamentsRouter } from "./tournaments.js";
+import { tournamentGiftRouter } from "./tournamentGiftCenter.js";
 import { tournamentQualificationRouter, maintainQualificationStarts } from "./tournamentQualificationStart.js";
 import { tournamentFinalistsRouter, maintainFinalistArrivals } from "./tournamentFinalists.js";
 import { tournamentFinaleRouter, maintainFinaleStarts } from "./tournamentFinale.js";
@@ -65,6 +66,7 @@ app.use("/api/tournaments", tournamentFinaleRouter);
 app.use("/api/tournaments", tournamentAwardsRouter);
 app.use("/api/tournaments", tournamentSkinsRouter);
 app.use("/api/tournaments", tournamentsRouter);
+app.use("/api/tournaments", tournamentGiftRouter);
 app.use("/api/history", historyRouter);
 app.use("/api/owner", ownerNotificationsRouter);
 app.use((error, _req, res, _next) => {
