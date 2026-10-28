@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import { Router } from 'express';
 import { pool } from './db.js';
 import { requireSession } from './auth.js';
+import { ensureProfileBackgroundAccess } from './profileBackgroundAccess.js';
 import { ensureWallet } from './wallet.js';
 import { ensureTournamentSkinTables } from './tournamentSkins.js';
 import { validateOwnerGift, summarizeOwnerGift } from './ownerGiftRules.js';
@@ -19,7 +20,7 @@ async function requireOwner(userId,c=pool){
 let ready;
 export function ensureOwnerGifts(){
   if(!ready)ready=(async()=>{
-    await ensureWallet();await ensureTournamentSkinTables();
+    await ensureWallet();await ensureTournamentSkinTables();await ensureProfileBackgroundAccess();
     const c=await pool.connect();
     try{
       await c.query('BEGIN');await c.query('SELECT pg_advisory_xact_lock(62498619)');
@@ -58,7 +59,16 @@ export function ensureOwnerGifts(){
       await c.query('ALTER TABLE maf_studio_skin_unlocks DROP CONSTRAINT IF EXISTS maf_studio_skin_unlocks_prize_kind_check');
       await c.query(`ALTER TABLE maf_studio_skin_unlocks ADD CONSTRAINT maf_studio_skin_unlocks_prize_kind_check
         CHECK(prize_kind IN ('participation','winner','owner_gift'))`);
-      await c.query("ALTER TABLE maf_users ADD COLUMN IF NOT EXISTS profile_background_id text NOT NULL DEFAULT 'matrix-rain'");
+      await c.query("ALTER TABLE maf_users ADD COLUMN IF NOT EXISTS profile_background_id text NOT NULL DEFAULT 'classic'");
+
+      // Conserve les fonds deja gagnes dans des coffres ouverts.
+      await c.query(`INSERT INTO maf_profile_background_unlocks(user_id,background_id)
+        SELECT DISTINCT r.user_id,'matrix-rain'
+        FROM maf_owner_gift_recipients r
+        WHERE r.opened_at IS NOT NULL AND
+        (r.outcome->>'backgroundId'='matrix-rain' OR
+         r.outcome @> '{"lots":[{"kind":"background","backgroundId":"matrix-rain"}]}'::jsonb)
+        ON CONFLICT(user_id,background_id) DO NOTHING`);
       await c.query('COMMIT');
     }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
   })().catch(e=>{ready=null;throw e;});
@@ -86,6 +96,11 @@ ownerGiftsRouter.get('/mine',requireSession,wrap(async(req,res)=>{
     WHERE r.user_id=$1 AND g.revoked_at IS NULL ORDER BY g.id DESC LIMIT 100`,[req.userId]);
   res.json({gifts:rows.map(r=>({...summarizeOwnerGift(r),openedAt:r.opened_at,
     receipt:r.opened_at?r.outcome:null})),legacyHiddenBefore:await legacyGiftHiddenBefore()});
+}));
+ownerGiftsRouter.get('/backgrounds/mine',requireSession,wrap(async(req,res)=>{
+  await ensureOwnerGifts();
+  const result=await pool.query('SELECT background_id FROM maf_profile_background_unlocks WHERE user_id=$1',[req.userId]);
+  res.json({owned:['classic',...result.rows.map(r=>r.background_id)]});
 }));
 ownerGiftsRouter.get('/owner',requireSession,wrap(async(req,res)=>{
   await ensureOwnerGifts();await requireOwner(req.userId);
@@ -162,7 +177,10 @@ ownerGiftsRouter.post('/:id/open',requireSession,wrap(async(req,res)=>{
           VALUES($1,$2,NULL,'owner_gift') ON CONFLICT(user_id,skin_id) DO NOTHING`,[req.userId,p.skinId]);
         item.skinId=p.skinId;
       }else if(lotKind==='background'){
-        await c.query('UPDATE maf_users SET profile_background_id=$2 WHERE id=$1',[req.userId,p.backgroundId]);
+        if(p.backgroundId==='matrix-rain') {
+          await c.query(`INSERT INTO maf_profile_background_unlocks(user_id,background_id)
+            VALUES($1,$2) ON CONFLICT(user_id,background_id) DO NOTHING`,[req.userId,p.backgroundId]);
+        }
         item.backgroundId=p.backgroundId;
       }else if(lotKind==='coupon'){
         let code=row.coupon_code;

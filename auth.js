@@ -2,6 +2,7 @@
 // Routes : POST /api/register, POST /api/login, GET /api/me
 import { studioSkin } from './studioSkinCatalog.js';
 import { isAllowedProfileBackground, publicProfileBackground } from './profileBackgroundCatalog.js';
+import { ensureProfileBackgroundAccess, backgroundIsUnlocked } from './profileBackgroundAccess.js';
 import crypto from "node:crypto";
 import { promisify } from "node:util";
 import { Router } from "express";
@@ -41,9 +42,10 @@ export function ensureTable() {
         "alter table maf_users add column if not exists skin_id text not null default 'loki'"
       ))
       .then(() => pool.query(
-        "alter table maf_users add column if not exists profile_background_id text not null default 'matrix-rain'"
+        "alter table maf_users add column if not exists profile_background_id text not null default 'classic'"
       ))
       .then(() => ensureClientIds(pool))
+      .then(() => ensureProfileBackgroundAccess())
       .catch((error) => {
         tableReady = null;
         throw error;
@@ -209,6 +211,10 @@ authRouter.patch('/profile-background', requireSession, async (req, res) => {
   const backgroundId = req.body?.background_id;
   if (!isAllowedProfileBackground(backgroundId)) return fail(res, 400, 'Arriere-plan inconnu.');
   try {
+
+    await ensureProfileBackgroundAccess();
+    if (!await backgroundIsUnlocked(req.userId, backgroundId))
+      return fail(res, 403, 'Ce decor doit etre debloque par un cadeau.');
     const result = await pool.query(
       'update maf_users set profile_background_id = $1 where id = $2 returning *',
       [backgroundId, req.userId]
