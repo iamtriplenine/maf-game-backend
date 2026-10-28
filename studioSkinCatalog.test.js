@@ -2,8 +2,8 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {STUDIO_SKINS,studioSkin,selectedTournamentSkin,selectedSkinGrants,buildSkinGrantRecipients} from './studioSkinCatalog.js';
 test('six skins existants ont des IDs distincts et sont toujours publics',()=>{
-  assert.equal(STUDIO_SKINS.length,7);
-  assert.equal(new Set(STUDIO_SKINS.map(s=>s.id)).size,7);
+  assert.equal(STUDIO_SKINS.length,8);
+  assert.equal(new Set(STUDIO_SKINS.map(s=>s.id)).size,8);
   assert.equal(STUDIO_SKINS.filter(s=>s.access==='public').length,6);
   assert.equal(studioSkin('taunt-mixamo').access,'exclusive');
   assert.equal(studioSkin('loki').access,'public');
@@ -38,5 +38,13 @@ test('Taunt est une recompense exclusive stable pour participant ou champion',()
   ]);
   assert.deepEqual(selectedSkinGrants([{userId:10,place:2},{userId:11,place:1}], null, 'taunt-mixamo'),[
     {userId:11,skinId:'taunt-mixamo',kind:'winner'}
+  ]);
+});
+
+test('Ladybug est un skin exclusif selectionnable pour les cadeaux et tournois',()=>{
+  assert.equal(studioSkin('ladybug-mixamo').access,'exclusive');
+  assert.equal(selectedTournamentSkin('ladybug-mixamo'),'ladybug-mixamo');
+  assert.deepEqual(selectedSkinGrants([{userId:21,place:1},{userId:22,place:2}],null,'ladybug-mixamo'),[
+    {userId:21,skinId:'ladybug-mixamo',kind:'winner'}
   ]);
 });
