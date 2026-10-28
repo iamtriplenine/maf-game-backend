@@ -8,6 +8,7 @@ export const STUDIO_SKINS = Object.freeze([
   { id:'messi', name:'Messi', access:'public' },
   { id:'kushina', name:'Kushina', access:'public' },
   { id:'mutant-swipe', name:'Mutant', access:'public' },
+  { id:'taunt-mixamo', name:'Taunt', access:'exclusive' },
 ]);
 const allowed = new Map(STUDIO_SKINS.map(s=>[s.id,s]));
 export const studioSkin = id => allowed.get(id) || null;
