@@ -1,3 +1,4 @@
+import { realTournamentFeaturesEnabled } from './tournamentLaunchPolicy.js';
 // MAF Monopoly - credits reels transactionnels apres classement certifie.
 // Aucun client / proprietaire ne peut transmettre un classement ou payer manuellement.
 // Publication et paiement reel restent derriere trois indicateurs Render.
@@ -15,10 +16,7 @@ import { finalistFromMatch } from './tournamentFinalistRules.js';
 import { tournamentSeats } from './tournamentDynamicBudget.js';
 
 export const tournamentAwardsRouter = Router();
-export const realTournamentPayoutsEnabled = () =>
-  process.env.MAF_TOURNAMENT_REAL_START_ENABLED === 'true' &&
-  process.env.MAF_TOURNAMENT_FINAL_START_ENABLED === 'true' &&
-  process.env.MAF_TOURNAMENT_PAYOUTS_ENABLED === 'true';
+export const realTournamentPayoutsEnabled = () => realTournamentFeaturesEnabled();
 const fail = (status, message) => Object.assign(new Error(message), { status });
 const handle = fn => async (req,res,next) => {try { await fn(req,res); } catch(e) {
   if(e.status)return res.status(e.status).json({error:e.message});next(e);

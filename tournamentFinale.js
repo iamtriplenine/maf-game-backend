@@ -1,3 +1,4 @@
+import { realTournamentFeaturesEnabled } from './tournamentLaunchPolicy.js';
 import { captureFinalCertification } from './tournamentFinalCertification.js';
 import { finaleReference, tournamentReference } from './tournamentMatchReferences.js';
 // Etape 7 : orchestration de la finale. Demonstration owner en lecture seule.
@@ -17,8 +18,7 @@ import { initPresence, setPresence, expirePresence } from './monopolyPresence.js
 import { normalizeTurnClock, tickTurnClock } from './monopolyTurnClock.js';
 
 export const tournamentFinaleRouter = Router();
-export const finaleEnabled = () => process.env.MAF_TOURNAMENT_REAL_START_ENABLED === 'true' &&
-  process.env.MAF_TOURNAMENT_FINAL_START_ENABLED === 'true';
+export const finaleEnabled = () => realTournamentFeaturesEnabled();
 const fail=(status,message)=>Object.assign(new Error(message),{status});
 const handler=fn=>async(req,res,next)=>{try{await fn(req,res);}catch(e){if(e.status)return res.status(e.status).json({error:e.message});next(e);}};
 const positiveId=x=>{const n=Number(x);if(!Number.isSafeInteger(n)||n<1)throw fail(400,'Identifiant invalide.');return n;};
@@ -204,7 +204,7 @@ tournamentFinaleRouter.post('/qualifications/finale/:id/presence',requireSession
 // Salon unique: aucun non-finaliste n'a acces a la finale (ni a ses pseudos).
 // L'espace final est deja reserve en base, mais reste invisible avant la certification.
 tournamentFinaleRouter.get('/qualifications/finale/mine',requireSession,handler(async(req,res)=>{
-  if(process.env.MAF_TOURNAMENT_REAL_START_ENABLED!=='true')return res.json({finale:null,enabled:false,serverNow:Date.now()});
+  if(!realTournamentFeaturesEnabled())return res.json({finale:null,enabled:false,serverNow:Date.now()});
   await ensureFinaleTables();
   const rows=(await pool.query(`SELECT t.id,t.title,t.final_at,f.table_no,sc.next_start_at,sc.status AS schedule_status
     FROM maf_tournament_finalists f

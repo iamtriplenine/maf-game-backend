@@ -1,3 +1,4 @@
+import { realTournamentFeaturesEnabled } from './tournamentLaunchPolicy.js';
 // Tirage persistant, remboursement du surplus et creation atomique de 2 a 4 plateaux.
 // IMPORTANT : le lancement REEL est volontairement desactive tant que le
 // parcours joueur des qualifications n'a pas ete valide.
@@ -17,7 +18,7 @@ import { ensureFinaleTables } from './tournamentFinale.js';
 import { qualificationReference, tournamentReference } from './tournamentMatchReferences.js';
 
 export const tournamentQualificationRouter = Router();
-export const realQualificationEnabled = () => process.env.MAF_TOURNAMENT_REAL_START_ENABLED === 'true';
+export const realQualificationEnabled = () => realTournamentFeaturesEnabled();
 const fail = (status, message) => Object.assign(new Error(message), { status });
 const route = fn => async (req,res,next)=>{try{await fn(req,res);}catch(e){
   if(e.status)return res.status(e.status).json({error:e.message});next(e);

@@ -129,8 +129,8 @@ tournamentsRouter.post('/owner', requireSession, run(async (req,res) => {
   await owner(req);
   const values = input(req.body);
   const { rows } = await pool.query(`INSERT INTO maf_tournaments
-    (title,description,starts_at,final_at,status,participant_skin_id,winner_skin_id,creator_id)
-    VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`, [...values, req.userId]);
+    (title,description,starts_at,final_at,status,participant_skin_id,winner_skin_id,creator_id,registration_open)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,($5='published')) RETURNING *`, [...values, req.userId]);
   res.status(201).json({ tournament: view(rows[0]), serverNow: Date.now() });
 }));
 tournamentsRouter.put('/owner/:id', requireSession, run(async (req,res) => {
@@ -148,7 +148,10 @@ tournamentsRouter.put('/owner/:id', requireSession, run(async (req,res) => {
     if (row.revision !== revision) throw fail(409, 'Ce tournoi a été modifié ailleurs. Recharge la liste avant de réessayer.');
     if (Number(row.registered) > 0) throw fail(409, 'Ce tournoi comporte des réservations : modification bloquée.');
     const updated = await client.query(`UPDATE maf_tournaments SET title=$1,description=$2,starts_at=$3,
-      final_at=$4,status=$5,participant_skin_id=$6,winner_skin_id=$7,revision=revision+1,updated_at=now() WHERE id=$8 RETURNING *`, [...values,id]);
+      final_at=$4,status=$5,participant_skin_id=$6,winner_skin_id=$7,registration_open=CASE
+        WHEN status <> 'published' AND $5='published' THEN true
+        WHEN $5 <> 'published' THEN false
+        ELSE registration_open END,revision=revision+1,updated_at=now() WHERE id=$8 RETURNING *`, [...values,id]);
     await client.query('COMMIT');
     res.json({ tournament: view(updated.rows[0]), serverNow: Date.now() });
   } catch (e) { await client.query('ROLLBACK'); throw e; }

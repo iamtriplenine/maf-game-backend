@@ -1,3 +1,4 @@
+import { realTournamentFeaturesEnabled } from './tournamentLaunchPolicy.js';
 // Routes lecture seule / demonstration reservees au proprietaire 999.
 import { Router } from 'express';
 import { pool } from './db.js';
@@ -18,7 +19,7 @@ async function ensureFinalsReady(){await ensureQualificationTables();await ensur
 let pending;
 export function maintainFinalistArrivals(){
   if(pending)return pending;
-  pending=(async()=>{if(process.env.MAF_TOURNAMENT_REAL_START_ENABLED!=='true')return {enabled:false,created:0};
+  pending=(async()=>{if(!realTournamentFeaturesEnabled())return {enabled:false,created:0};
     await ensureFinalsReady();return reconcileFinalistArrivals();})().finally(()=>{pending=null;});
   return pending;
 }

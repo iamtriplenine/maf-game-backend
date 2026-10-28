@@ -93,7 +93,7 @@ export async function cancelTournament(id, reason, expectedRevision = null) {
       WHERE tournament_id=$1 AND status='reserved' ORDER BY user_id FOR UPDATE`, [id]
     )).rows;
     if (reason === 'incomplete' && entries.length >=
-        (process.env.MAF_TOURNAMENT_REAL_START_ENABLED === 'true' ? 10 : Number(tournament.capacity))) {
+        (10)) {
       await c.query('COMMIT');
       return null;
     }
@@ -144,7 +144,7 @@ export function maintainTournamentCancellations() {
   if (running) return running;
   running = (async () => {
     await ensureTournamentCancellation();
-    const minPlayers = process.env.MAF_TOURNAMENT_REAL_START_ENABLED === 'true' ? 10 : 20;
+    const minPlayers = 10;
     const { rows } = await pool.query(`SELECT t.id FROM maf_tournaments t
       WHERE t.status='published' AND t.cancelled_at IS NULL AND t.starts_at <= now()
         AND (SELECT count(*) FROM maf_tournament_entries e

@@ -1,3 +1,4 @@
+import { realTournamentFeaturesEnabled } from './tournamentLaunchPolicy.js';
 // Espace Recompenses MAF : heure de remise, coffre visuel et consultation personnelle.
 // Ce routeur ne modifie JAMAIS les soldes, les bonus, les skins ou les resultats.
 import { Router } from 'express';
@@ -192,7 +193,7 @@ tournamentGiftRouter.put('/gifts/owner/:id/schedule',requireSession,wrap(async(r
     await c.query(`INSERT INTO maf_tournament_gift_schedule(tournament_id,release_at,original_release_at) VALUES($1,$2,$2)
       ON CONFLICT(tournament_id) DO UPDATE SET release_at=EXCLUDED.release_at,original_release_at=EXCLUDED.original_release_at,updated_at=now()`,[id,releaseAt]);
     await c.query('COMMIT');
-    res.json({tournamentId:id,releaseAt,realPayoutsEnabled:process.env.MAF_TOURNAMENT_PAYOUTS_ENABLED==='true'});
+    res.json({tournamentId:id,releaseAt,realPayoutsEnabled:realTournamentFeaturesEnabled()});
   }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
 }));
 

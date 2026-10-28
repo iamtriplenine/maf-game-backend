@@ -1,3 +1,4 @@
+import { realTournamentFeaturesEnabled } from './tournamentLaunchPolicy.js';
 // Persistance serveur des quatre qualifiés. Un seul resultat par plateau.
 import { pool } from './db.js';
 import { finalistFromMatch, finalistOverview } from './tournamentFinalistRules.js';
@@ -50,7 +51,7 @@ export async function loadFinalistLobby(tournamentId) {
 
 // Rattrapage des qualifications qui etaient deja terminees (redemarrage/ancien deploiement).
 export async function reconcileFinalistArrivals() {
-  if (process.env.MAF_TOURNAMENT_REAL_START_ENABLED !== 'true') return {enabled:false,created:0};
+  if (!realTournamentFeaturesEnabled()) return {enabled:false,created:0};
   await ensureFinalistsTables();
   const c=await pool.connect();
   try {
