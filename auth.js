@@ -1,6 +1,7 @@
 // Comptes MAF : pseudo + code a 10 chiffres (pas de mot de passe).
 // Routes : POST /api/register, POST /api/login, GET /api/me
 import { studioSkin } from './studioSkinCatalog.js';
+import { isAllowedProfileBackground, publicProfileBackground } from './profileBackgroundCatalog.js';
 import crypto from "node:crypto";
 import { promisify } from "node:util";
 import { Router } from "express";
@@ -38,6 +39,9 @@ export function ensureTable() {
       )
       .then(() => pool.query(
         "alter table maf_users add column if not exists skin_id text not null default 'loki'"
+      ))
+      .then(() => pool.query(
+        "alter table maf_users add column if not exists profile_background_id text not null default 'matrix-rain'"
       ))
       .then(() => ensureClientIds(pool))
       .catch((error) => {
@@ -101,6 +105,7 @@ function addFailure(key) {
 export const publicUser = (row) => ({
   id: row.id, client_id: row.client_id, pseudo: row.pseudo, balance: row.balance,
   skin_id: row.skin_id || "loki",
+  profile_background_id: publicProfileBackground(row.profile_background_id),
   bonus_balance: row.bonus_balance || 0, phone: row.phone || null,
   phone_registered_at: row.phone_registered_at || null,
   phone_verification_deadline: row.phone_verification_deadline || null,
@@ -198,6 +203,23 @@ export function requireSession(req, res, next) {
   req.userId = data.uid;
   next();
 }
+
+// Fonds Studio 3D : Matrix accessible a tous, preference du compte.
+authRouter.patch('/profile-background', requireSession, async (req, res) => {
+  const backgroundId = req.body?.background_id;
+  if (!isAllowedProfileBackground(backgroundId)) return fail(res, 400, 'Arriere-plan inconnu.');
+  try {
+    const result = await pool.query(
+      'update maf_users set profile_background_id = $1 where id = $2 returning *',
+      [backgroundId, req.userId]
+    );
+    if (!result.rows[0]) return fail(res, 401, 'Compte introuvable.');
+    res.json({ user: publicUser(result.rows[0]) });
+  } catch (error) {
+    console.error('profile-background :', error.message);
+    fail(res, 500, "Impossible d'enregistrer l'arriere-plan.");
+  }
+});
 
 // Catalogue Studio 3D : les skins actuels restent publics. Les futurs exclusifs
 // doivent appartenir au compte avant de pouvoir etre equipes.
