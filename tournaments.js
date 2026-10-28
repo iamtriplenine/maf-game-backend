@@ -88,8 +88,15 @@ tournamentsRouter.use((req,res,next) => { res.set('Cache-Control','no-store'); n
 tournamentsRouter.use((req,res,next) => ensureTournaments().then(() => next()).catch(next));
 mountReservations(tournamentsRouter, { select, view, fail, run, owner });
 tournamentsRouter.get('/', run(async (req,res) => {
-  const { rows } = await pool.query(select + " WHERE t.status='published' ORDER BY t.starts_at,t.id");
-  res.json({ tournaments: rows.map(view), serverNow: Date.now() });
+  const { rows } = await pool.query(select + " WHERE t.status='published' AND t.deleted_at IS NULL AND t.cancelled_at IS NULL ORDER BY t.starts_at,t.id");
+  // Seuls les pseudos publics : jamais d'ID interne, de solde ou de donnees de profil.
+  const participants=await pool.query(`SELECT e.tournament_id,u.pseudo FROM maf_tournament_entries e
+    JOIN maf_users u ON u.id=e.user_id JOIN maf_tournaments t ON t.id=e.tournament_id
+    WHERE e.status='reserved' AND t.status='published' AND t.deleted_at IS NULL AND t.cancelled_at IS NULL
+    ORDER BY e.tournament_id,e.created_at,e.user_id`);
+  const byId=new Map();
+  for(const row of participants.rows){const id=Number(row.tournament_id);if(!byId.has(id))byId.set(id,[]);byId.get(id).push(row.pseudo);}
+  res.json({ tournaments: rows.map(row=>({...view(row),participants:(byId.get(row.id)||[])})), serverNow: Date.now() });
 }));
 tournamentsRouter.get('/owner', requireSession, run(async (req,res) => {
   await owner(req);

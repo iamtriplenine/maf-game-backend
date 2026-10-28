@@ -12,6 +12,8 @@ import { ensureFinalistsTables, recordWinnerForMatch } from './tournamentFinalis
 import { initPresence, setPresence, expirePresence } from './monopolyPresence.js';
 import { tickTurnClock, normalizeTurnClock } from './monopolyTurnClock.js';
 import { lobbyDeadline, lobbyOutcome, launchWithAbsences } from './tournamentLiveRules.js';
+import { privateMatchView } from './tournamentPrivateView.js';
+import { ensureFinaleTables } from './tournamentFinale.js';
 
 export const tournamentQualificationRouter = Router();
 export const realQualificationEnabled = () => process.env.MAF_TOURNAMENT_REAL_START_ENABLED === 'true';
@@ -21,10 +23,7 @@ const route = fn => async (req,res,next)=>{try{await fn(req,res);}catch(e){
 }};
 const numericId = value => {const n=Number(value);if(!Number.isSafeInteger(n)||n<1)throw fail(400,'Identifiant invalide.');return n;};
 // Ne jamais exposer l'ordre des cartes restants (decks), ni les identifiants internes des adversaires.
-function playerView(match, userId) {
-  const { decks: _decks, ...game } = match.game;
-  return {format:match.format,game,seats:match.seats.map(p=>({seat:p.seat,name:p.name,isYou:p.userId===userId}))};
-}
+const playerView = privateMatchView;
 async function checkOwner(req) {
   const result=await pool.query('SELECT pseudo_key FROM maf_users WHERE id=$1',[req.userId]);
   if(result.rows[0]?.pseudo_key!=='999') throw fail(403,'Reserve au compte proprietaire 999.');
@@ -89,6 +88,7 @@ export async function startDueQualifications() {
 export async function startQualificationTournament(id){
   if(!realQualificationEnabled())throw fail(403,'Le demarrage reel est desactive.');
   await ensureQualificationTables();
+  await ensureFinaleTables();
   id=numericId(id);
   const c=await pool.connect();
   try{
@@ -137,6 +137,9 @@ export async function startQualificationTournament(id){
       await c.query(`INSERT INTO maf_tournament_qualification_matches (tournament_id,table_no,state,scheduled_at,lobby_status)
         VALUES($1,$2,$3::jsonb,$4,'waiting')`,[id,group.table,JSON.stringify(game),new Date(Math.max(Date.now(),new Date(tournament.starts_at).getTime())).toISOString()]);
     }
+    // La finale est preparee en base des le tirage, mais cachee aux non-qualifies.
+    await c.query(`INSERT INTO maf_tournament_final_schedules(tournament_id,planned_at,next_start_at)
+      VALUES($1,$2,$2) ON CONFLICT(tournament_id) DO NOTHING`,[id,tournament.final_at]);
     await c.query('COMMIT');return true;
   }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}
   finally{c.release();}

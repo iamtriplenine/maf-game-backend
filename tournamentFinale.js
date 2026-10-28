@@ -9,6 +9,10 @@ import { ensureQualificationTables } from './tournamentQualificationStart.js';
 import { ensureFinalistsTables } from './tournamentFinalistStore.js';
 import { finalistOverview, finalistFromMatch } from './tournamentFinalistRules.js';
 import { FINAL_DELAY_MS, nextFinalSlot, finalePreview, createFinaleMatch } from './tournamentFinalScheduleRules.js';
+import { privateMatchView } from './tournamentPrivateView.js';
+import { finalAction } from './tournamentFinalGame.js';
+import { initPresence, setPresence, expirePresence } from './monopolyPresence.js';
+import { normalizeTurnClock, tickTurnClock } from './monopolyTurnClock.js';
 
 export const tournamentFinaleRouter = Router();
 export const finaleEnabled = () => process.env.MAF_TOURNAMENT_REAL_START_ENABLED === 'true' &&
@@ -119,6 +123,8 @@ export async function startFinaleIfDue(tournamentId, now = new Date()) {
       await c.query('COMMIT');return {started:false,reason:!ready?'qualifications':'presence',nextAt:new Date(next).toISOString()};
     }
     const state=createFinaleMatch(ready,createGame);
+    initPresence(state.game,state.seats.map(p=>p.userId),time.getTime());
+    normalizeTurnClock(state.game,time.getTime());
     await c.query(`INSERT INTO maf_tournament_final_matches(tournament_id,state) VALUES($1,$2::jsonb)`,[id,JSON.stringify(state)]);
     await c.query(`UPDATE maf_tournament_final_schedules SET status='started',started_at=$2,updated_at=now()
       WHERE tournament_id=$1`,[id,time.toISOString()]);
@@ -173,7 +179,106 @@ tournamentFinaleRouter.post('/qualifications/finale/:id/presence',requireSession
   if(!tournament)throw fail(404,'Tournoi indisponible.');
   const member=(await pool.query('SELECT 1 FROM maf_tournament_finalists WHERE tournament_id=$1 AND user_id=$2',[id,req.userId])).rows[0];
   if(!member)throw fail(403,'Tu ne fais pas partie des finalistes.');
-  await pool.query(`INSERT INTO maf_tournament_final_presence(tournament_id,user_id,present_at)
-    VALUES($1,$2,now()) ON CONFLICT(tournament_id,user_id) DO UPDATE SET present_at=now()`,[id,req.userId]);
-  res.json({ok:true});
+  if(!['here','away'].includes(req.body?.state))throw fail(400,'Presence invalide.');
+  const c=await pool.connect();
+  try{
+    await c.query('BEGIN');
+    // Verrou du match : la presence et le tour ne se remplacent pas mutuellement.
+    const live=(await c.query('SELECT * FROM maf_tournament_final_matches WHERE tournament_id=$1 FOR UPDATE',[id])).rows[0];
+    if(live){
+      const state=structuredClone(live.state);
+      if(setPresence(state.game,state.seats.map(p=>({id:p.userId})),req.userId,req.body.state)){
+        await c.query(`UPDATE maf_tournament_final_matches SET state=$2::jsonb
+          WHERE tournament_id=$1`,[id,JSON.stringify(state)]);
+      }
+    }else if(req.body.state==='here'){
+      await c.query(`INSERT INTO maf_tournament_final_presence(tournament_id,user_id,present_at)
+        VALUES($1,$2,now()) ON CONFLICT(tournament_id,user_id) DO UPDATE SET present_at=now()`,[id,req.userId]);
+    }
+    await c.query('COMMIT');res.json({ok:true});
+  }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
 }));
+
+// Salon unique: aucun non-finaliste n'a acces a la finale (ni a ses pseudos).
+// L'espace final est deja reserve en base, mais reste invisible avant la certification.
+tournamentFinaleRouter.get('/qualifications/finale/mine',requireSession,handler(async(req,res)=>{
+  if(process.env.MAF_TOURNAMENT_REAL_START_ENABLED!=='true')return res.json({finale:null,enabled:false,serverNow:Date.now()});
+  await ensureFinaleTables();
+  const rows=(await pool.query(`SELECT t.id,t.title,t.final_at,f.table_no,sc.next_start_at,sc.status AS schedule_status
+    FROM maf_tournament_finalists f
+    JOIN maf_tournaments t ON t.id=f.tournament_id
+    LEFT JOIN maf_tournament_final_schedules sc ON sc.tournament_id=t.id
+    WHERE f.user_id=$1 AND t.status='published' AND t.deleted_at IS NULL AND t.cancelled_at IS NULL
+    ORDER BY t.starts_at DESC LIMIT 1`,[req.userId])).rows;
+  const row=rows[0];
+  if(!row)return res.json({finale:null,enabled:true,serverNow:Date.now()});
+  const roster=(await pool.query(`SELECT f.table_no,u.pseudo FROM maf_tournament_finalists f
+    JOIN maf_users u ON u.id=f.user_id WHERE f.tournament_id=$1 ORDER BY f.table_no`,[row.id])).rows;
+  const expectedRows=(await pool.query(`SELECT count(*)::int AS count FROM maf_tournament_qualification_matches
+    WHERE tournament_id=$1`,[row.id])).rows;
+  const live=(await pool.query(`SELECT state,revision,started_at FROM maf_tournament_final_matches WHERE tournament_id=$1`,[row.id])).rows[0];
+  res.json({finale:{tournamentId:Number(row.id),title:row.title,qualified:true,
+    plannedAt:new Date(row.final_at).toISOString(),nextAt:live?null:new Date(row.next_start_at||row.final_at).toISOString(),
+    status:live?(live.state.game.phase==='over'?'finished':'playing'):'waiting',
+    finalistCount:roster.length,expectedFinalists:Number(expectedRows[0].count),
+    finalists:roster.map(p=>({table:Number(p.table_no),name:p.pseudo})),
+    revision:live?.revision||null,state:live?privateMatchView(live.state,req.userId):null,
+    enabled:finaleEnabled()},enabled:true,serverNow:Date.now()});
+}));
+
+// Controle de chaque mouvement par le serveur, avec version optimiste et ID de session.
+tournamentFinaleRouter.post('/qualifications/finale/:id/action',requireSession,handler(async(req,res)=>{
+  if(!finaleEnabled())throw fail(403,'La finale est desactivee.');
+  await ensureFinaleTables();const id=positiveId(req.params.id),revision=req.body?.revision;
+  if(!Number.isSafeInteger(revision)||revision<1)throw fail(400,'Version de partie requise.');
+  const c=await pool.connect();
+  try {
+    await c.query('BEGIN');
+    const row=(await c.query('SELECT * FROM maf_tournament_final_matches WHERE tournament_id=$1 FOR UPDATE',[id])).rows[0];
+    if(!row)throw fail(404,'Finale non commencee.');
+    if(!row.state.seats.some(s=>Number(s.userId)===req.userId))throw fail(403,'Finale privee.');
+    if(row.revision!==revision)throw fail(409,'La finale a change : recharge.');
+    if(row.state.game.presence?.away?.[String(req.userId)]!==undefined)throw fail(409,'Reviens sur le plateau avant de jouer.');
+    const next=finalAction(row.state,{userId:req.userId,action:req.body?.action,square:req.body?.square});
+    normalizeTurnClock(next.game);
+    const result=await c.query(`UPDATE maf_tournament_final_matches
+      SET state=$2::jsonb,revision=revision+1 WHERE tournament_id=$1 RETURNING revision`,[id,JSON.stringify(next)]);
+    await c.query('COMMIT');res.json({state:privateMatchView(next,req.userId),revision:result.rows[0].revision});
+  }catch(e){await c.query('ROLLBACK').catch(()=>{});
+    if(!e.status && (e.message.includes('finale')||e.message.includes('tour')||e.message.includes('Action')||e.message.includes('phase')))throw fail(409,'Action impossible pour ce tour.');
+    throw e;
+  }finally{c.release();}
+}));
+
+// Maintenance autonome de la finale, meme navigateur ferme.
+let tickingFinales;
+export function maintainFinaleMatches(){
+  if(tickingFinales)return tickingFinales;
+  tickingFinales=(async()=>{
+    if(!finaleEnabled())return {enabled:false};
+    await ensureFinaleTables();
+    const {rows}=await pool.query(`SELECT tournament_id FROM maf_tournament_final_matches
+      WHERE state->'game'->>'phase'<>'over' ORDER BY tournament_id DESC LIMIT 100`);
+    let changed=0;
+    for(const {tournament_id:id} of rows){
+      const c=await pool.connect();
+      try{
+        await c.query('BEGIN');
+        const row=(await c.query('SELECT * FROM maf_tournament_final_matches WHERE tournament_id=$1 FOR UPDATE',[id])).rows[0];
+        if(!row||row.state.game.phase==='over'){await c.query('COMMIT');continue;}
+        const state=structuredClone(row.state),now=Date.now();
+        const members=state.seats.map(s=>({id:s.userId}));
+        const presence=expirePresence(state.game,members,now);
+        const turn=tickTurnClock(presence.game,{now,autoEnd:true});
+        if(presence.changed||turn.changed){
+          state.game=turn.game;
+          await c.query(`UPDATE maf_tournament_final_matches SET state=$2::jsonb,revision=revision+1
+            WHERE tournament_id=$1`,[id,JSON.stringify(state)]);
+          changed++;
+        }
+        await c.query('COMMIT');
+      }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
+    }
+    return {enabled:true,changed};
+  })().finally(()=>{tickingFinales=null;});return tickingFinales;
+}

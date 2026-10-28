@@ -6,7 +6,7 @@ import { tournamentsRouter } from "./tournaments.js";
 import { tournamentGiftRouter, maintainTournamentGiftClock } from "./tournamentGiftCenter.js";
 import { tournamentQualificationRouter, maintainQualificationStarts, maintainQualificationMatches } from "./tournamentQualificationStart.js";
 import { tournamentFinalistsRouter, maintainFinalistArrivals } from "./tournamentFinalists.js";
-import { tournamentFinaleRouter, maintainFinaleStarts } from "./tournamentFinale.js";
+import { tournamentFinaleRouter, maintainFinaleStarts, maintainFinaleMatches } from "./tournamentFinale.js";
 import { tournamentAwardsRouter } from "./tournamentAwards.js";
 import { tournamentSkinsRouter } from "./tournamentSkins.js";
 import { tournamentCancellationRouter, maintainTournamentCancellations } from "./tournamentCancellation.js";
@@ -109,6 +109,7 @@ void maintainFinalistArrivals().catch(e => console.error('tournament finalists s
 
 // Etape 7 : maintenance serveur, aucun depart reel par defaut.
 setInterval(() => { void maintainFinaleStarts().catch(e => console.error('finale maintenance:',e.message)); },30000).unref();
+setInterval(() => { void maintainFinaleMatches().catch(e => console.error('finale live:',e.message)); },5000).unref();
 setInterval(() => { void maintainTournamentGiftClock().catch(e => console.error('tournament gifts clock:',e.message)); },30000).unref();
 void maintainFinaleStarts().catch(e => console.error('finale setup:',e.message));
 
