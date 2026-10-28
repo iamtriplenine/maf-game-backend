@@ -3,8 +3,8 @@ import cors from "cors";
 import { walletRouter } from "./wallet.js";
 import { winPracticeRouter } from "./winPractice.js";
 import { tournamentsRouter } from "./tournaments.js";
-import { tournamentGiftRouter } from "./tournamentGiftCenter.js";
-import { tournamentQualificationRouter, maintainQualificationStarts } from "./tournamentQualificationStart.js";
+import { tournamentGiftRouter, maintainTournamentGiftClock } from "./tournamentGiftCenter.js";
+import { tournamentQualificationRouter, maintainQualificationStarts, maintainQualificationMatches } from "./tournamentQualificationStart.js";
 import { tournamentFinalistsRouter, maintainFinalistArrivals } from "./tournamentFinalists.js";
 import { tournamentFinaleRouter, maintainFinaleStarts } from "./tournamentFinale.js";
 import { tournamentAwardsRouter } from "./tournamentAwards.js";
@@ -101,6 +101,7 @@ void maintainTournamentCancellations().catch(error => console.error("tournament 
 // Le vrai lancement reste desactive tant que MAF_TOURNAMENT_REAL_START_ENABLED n'est pas 'true'.
 setInterval(() => { void maintainQualificationStarts().catch(e => console.error('tournament start:', e.message)); }, 30000).unref();
 void maintainQualificationStarts().catch(e => console.error('tournament start setup:', e.message));
+setInterval(() => { void maintainQualificationMatches().catch(e=>console.error('tournament presence:',e.message)); },5000).unref();
 
 // Etape 6 : recuperation des gagnants enregistres apres une interruption.
 setInterval(() => { void maintainFinalistArrivals().catch(e => console.error('tournament finalists:',e.message)); },30000).unref();
@@ -108,6 +109,7 @@ void maintainFinalistArrivals().catch(e => console.error('tournament finalists s
 
 // Etape 7 : maintenance serveur, aucun depart reel par defaut.
 setInterval(() => { void maintainFinaleStarts().catch(e => console.error('finale maintenance:',e.message)); },30000).unref();
+setInterval(() => { void maintainTournamentGiftClock().catch(e => console.error('tournament gifts clock:',e.message)); },30000).unref();
 void maintainFinaleStarts().catch(e => console.error('finale setup:',e.message));
 
 // Duel programme: rattrapage apres reveil, redemarrage et indisponibilite temporaire.

@@ -5,6 +5,7 @@ import { pool } from './db.js';
 import { requireSession } from './auth.js';
 import { ensureTournamentAwardTables } from './tournamentAwards.js';
 import { ownerDemoGift, rewardAvailability, validateReleaseAt } from './tournamentGiftRules.js';
+import { postponedGiftAt } from './tournamentLiveRules.js';
 
 export const tournamentGiftRouter = Router();
 const problem=(status,message)=>Object.assign(new Error(message),{status});
@@ -34,8 +35,13 @@ export function ensureTournamentGifts(){
       await c.query(`CREATE TABLE IF NOT EXISTS maf_tournament_gift_schedule (
         tournament_id integer PRIMARY KEY REFERENCES maf_tournaments(id),
         release_at timestamptz NOT NULL,
+        original_release_at timestamptz,
         updated_at timestamptz NOT NULL DEFAULT now()
       )`);
+      await c.query(`ALTER TABLE maf_tournament_gift_schedule
+        ADD COLUMN IF NOT EXISTS original_release_at timestamptz`);
+      await c.query(`UPDATE maf_tournament_gift_schedule SET original_release_at=release_at
+        WHERE original_release_at IS NULL`);
       await c.query(`CREATE TABLE IF NOT EXISTS maf_tournament_gift_openings (
         tournament_id integer NOT NULL REFERENCES maf_tournaments(id),
         user_id integer NOT NULL REFERENCES maf_users(id),
@@ -46,6 +52,56 @@ export function ensureTournamentGifts(){
     }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
   })().catch(e=>{ready=null;throw e;});
   return ready;
+}
+// Dans la meme transaction que l'ouverture, bloque la remise si une qualification
+// a demarre et si la finale n'est pas encore terminee. Fonctionne meme apres un
+// redemarrage du serveur : la base conserve l'heure deja reportee.
+async function adjustGiftClock(c,id){
+  const result=await c.query(`SELECT g.release_at,g.original_release_at,
+    EXISTS(SELECT 1 FROM maf_tournament_qualification_matches m WHERE m.tournament_id=g.tournament_id) AS started,
+    EXISTS(SELECT 1 FROM maf_tournament_final_matches f
+      WHERE f.tournament_id=g.tournament_id AND f.state->'game'->>'phase'='over') AS finale_over
+    FROM maf_tournament_gift_schedule g WHERE g.tournament_id=$1 FOR UPDATE OF g`,[id]);
+  const state=result.rows[0];
+  if(!state || !state.started)return false;
+  const now=Date.now();
+  let next=null;
+  if(!state.finale_over){
+    next=postponedGiftAt(state.release_at,now,true);
+  }else if(new Date(state.release_at).getTime()>new Date(state.original_release_at).getTime()){
+    // Finale finie : les cadeaux ne sont plus retenus par les tranches futures.
+    next=new Date(state.original_release_at).toISOString();
+  }
+  if(next && new Date(next).getTime()!==new Date(state.release_at).getTime()){
+    await c.query(`UPDATE maf_tournament_gift_schedule
+      SET release_at=$2,updated_at=now() WHERE tournament_id=$1`,[id,next]);
+    return true;
+  }
+  return false;
+}
+let clockRun;
+export function maintainTournamentGiftClock(){
+  if(clockRun)return clockRun;
+  clockRun=(async()=>{
+    await ensureTournamentGifts();
+    const matches=(await pool.query(`SELECT g.tournament_id
+      FROM maf_tournament_gift_schedule g
+      WHERE (g.release_at <= now() OR g.release_at>g.original_release_at)
+      AND EXISTS(SELECT 1 FROM maf_tournament_qualification_matches m WHERE m.tournament_id=g.tournament_id)
+      ORDER BY g.tournament_id DESC LIMIT 100`)).rows;
+    let changed=0;
+    for(const m of matches){
+      const c=await pool.connect();
+      try{await c.query('BEGIN');
+        // Meme ordre de verrouillage que la route /open.
+        await c.query('SELECT id FROM maf_tournaments WHERE id=$1 FOR UPDATE',[m.tournament_id]);
+        if(await adjustGiftClock(c,m.tournament_id))changed++;
+        await c.query('COMMIT');
+      }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
+    }
+    return {changed};
+  })().finally(()=>{clockRun=null;});
+  return clockRun;
 }
 function output(row,now){
   const releaseAt=row.release_at?new Date(row.release_at).toISOString():null;
@@ -76,6 +132,7 @@ const itemSql=`SELECT t.id,t.title,e.status AS entry_status,g.release_at,o.opene
 tournamentGiftRouter.use((_,res,next)=>{res.set('Cache-Control','private, no-store');next();});
 tournamentGiftRouter.get('/gifts/mine',requireSession,wrap(async(req,res)=>{
   await ensureTournamentGifts();
+  await maintainTournamentGiftClock();
   const {rows}=await pool.query(itemSql+' ORDER BY t.starts_at DESC LIMIT 50',[req.userId]);
   res.json({gifts:rows.map(r=>output(r,Date.now())),serverNow:Date.now(),
     note:'Aucun montant n est attribue depuis le coffre. Les gains doivent etre certifies et credites separement.'});
@@ -88,6 +145,7 @@ tournamentGiftRouter.post('/gifts/:id/open',requireSession,wrap(async(req,res)=>
     await c.query('BEGIN');
     // Le meme verrou tournoi est pris par le proprietaire lors d'un changement d'heure.
     await c.query('SELECT id FROM maf_tournaments WHERE id=$1 FOR UPDATE',[id]);
+    await adjustGiftClock(c,id);
     const {rows}=await c.query(itemSql+' AND t.id=$2 FOR UPDATE OF e',[req.userId,id]);
     if(!rows.length)throw problem(404,'Aucun cadeau pour ce compte.');
     const row=rows[0],state=output(row,Date.now());
@@ -122,8 +180,8 @@ tournamentGiftRouter.put('/gifts/owner/:id/schedule',requireSession,wrap(async(r
     const releaseAt=validateReleaseAt(req.body?.releaseAt,new Date(row.final_at).toISOString());
     const previous=(await c.query('SELECT count(*)::int AS n FROM maf_tournament_gift_openings WHERE tournament_id=$1',[id])).rows[0].n;
     if(previous>0)throw problem(409,'Une remise a deja été ouverte : heure verrouillée.');
-    await c.query(`INSERT INTO maf_tournament_gift_schedule(tournament_id,release_at) VALUES($1,$2)
-      ON CONFLICT(tournament_id) DO UPDATE SET release_at=EXCLUDED.release_at,updated_at=now()`,[id,releaseAt]);
+    await c.query(`INSERT INTO maf_tournament_gift_schedule(tournament_id,release_at,original_release_at) VALUES($1,$2,$2)
+      ON CONFLICT(tournament_id) DO UPDATE SET release_at=EXCLUDED.release_at,original_release_at=EXCLUDED.original_release_at,updated_at=now()`,[id,releaseAt]);
     await c.query('COMMIT');
     res.json({tournamentId:id,releaseAt,realPayoutsEnabled:false});
   }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}

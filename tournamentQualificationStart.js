@@ -9,6 +9,9 @@ import { createQualificationGame, playQualificationAction } from './tournamentQu
 import { qualificationDraw, REQUIRED_PLAYERS } from './tournamentDraw.js';
 import { tournamentSeats } from './tournamentDynamicBudget.js';
 import { ensureFinalistsTables, recordWinnerForMatch } from './tournamentFinalistStore.js';
+import { initPresence, setPresence, expirePresence } from './monopolyPresence.js';
+import { tickTurnClock, normalizeTurnClock } from './monopolyTurnClock.js';
+import { lobbyDeadline, lobbyOutcome, launchWithAbsences } from './tournamentLiveRules.js';
 
 export const tournamentQualificationRouter = Router();
 export const realQualificationEnabled = () => process.env.MAF_TOURNAMENT_REAL_START_ENABLED === 'true';
@@ -48,7 +51,22 @@ export function ensureQualificationTables(){
         revision integer NOT NULL DEFAULT 1,
         started_at timestamptz NOT NULL DEFAULT now(),
         updated_at timestamptz NOT NULL DEFAULT now(),
+        scheduled_at timestamptz,
+        lobby_status text NOT NULL DEFAULT 'waiting',
         UNIQUE(tournament_id,table_no)
+      )`);
+      await c.query(`ALTER TABLE maf_tournament_qualification_matches
+        ADD COLUMN IF NOT EXISTS scheduled_at timestamptz`);
+      await c.query(`ALTER TABLE maf_tournament_qualification_matches
+        ADD COLUMN IF NOT EXISTS lobby_status text NOT NULL DEFAULT 'waiting'`);
+      await c.query(`UPDATE maf_tournament_qualification_matches SET scheduled_at=started_at
+        WHERE scheduled_at IS NULL`);
+      await c.query(`CREATE TABLE IF NOT EXISTS maf_tournament_qualification_presence (
+        match_id bigint NOT NULL REFERENCES maf_tournament_qualification_matches(id),
+        user_id integer NOT NULL REFERENCES maf_users(id),
+        joined_at timestamptz NOT NULL DEFAULT now(),
+        last_seen_at timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY(match_id,user_id)
       )`);
       await c.query('COMMIT');
     }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
@@ -116,8 +134,8 @@ export async function startQualificationTournament(id){
     const groups=qualificationDraw(eligible.map(r=>({userId:Number(r.user_id),name:r.pseudo})));
     for(const group of groups){
       const game=createQualificationGame(group.players);
-      await c.query(`INSERT INTO maf_tournament_qualification_matches (tournament_id,table_no,state)
-        VALUES($1,$2,$3::jsonb)`,[id,group.table,JSON.stringify(game)]);
+      await c.query(`INSERT INTO maf_tournament_qualification_matches (tournament_id,table_no,state,scheduled_at,lobby_status)
+        VALUES($1,$2,$3::jsonb,$4,'waiting')`,[id,group.table,JSON.stringify(game),new Date(Math.max(Date.now(),new Date(tournament.starts_at).getTime())).toISOString()]);
     }
     await c.query('COMMIT');return true;
   }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}
@@ -145,17 +163,101 @@ tournamentQualificationRouter.get('/qualifications/owner/:id',requireSession,rou
     startedAt:r.started_at,players:r.state.seats.map(p=>({name:p.name,seat:p.seat,userId:p.userId}))})),
     realStartEnabled:realQualificationEnabled()});
 }));
-// Les routes joueur restent inactives tant que le test proprietaire est seul publie.
+// Les joueurs ouvrent volontairement le plateau ; un simple GET n'est jamais une preuve de presence.
 tournamentQualificationRouter.get('/qualifications/mine',requireSession,route(async(req,res)=>{
-  if(!realQualificationEnabled())throw fail(403,'Qualifications non ouvertes.');
+  if(!realQualificationEnabled())return res.json({match:null,enabled:false,serverNow:Date.now()});
   await ensureQualificationTables();
-  const rows=(await pool.query(`SELECT q.id,q.tournament_id,q.table_no,q.state,q.revision FROM maf_tournament_qualification_matches q
-    WHERE q.state @> $1::jsonb ORDER BY q.started_at DESC LIMIT 1`,
+  const rows=(await pool.query(`SELECT q.id,q.tournament_id,q.table_no,q.state,q.revision,
+    q.lobby_status,q.scheduled_at,t.title FROM maf_tournament_qualification_matches q
+    JOIN maf_tournaments t ON t.id=q.tournament_id
+    WHERE q.state @> $1::jsonb AND t.deleted_at IS NULL AND t.cancelled_at IS NULL
+    ORDER BY q.started_at DESC LIMIT 1`,
     [JSON.stringify({seats:[{userId:req.userId}]})])).rows;
   const found=rows[0];
-  res.json({match:found?{id:found.id,tournamentId:found.tournament_id,table:found.table_no,
-    revision:found.revision,state:playerView(found.state,req.userId)}:null});
+  if(!found)return res.json({match:null,enabled:true,serverNow:Date.now()});
+  const joined=(await pool.query(`SELECT user_id FROM maf_tournament_qualification_presence
+    WHERE match_id=$1 AND last_seen_at>=now()-interval '20 seconds'`,[found.id])).rows.map(r=>Number(r.user_id));
+  res.json({match:{id:Number(found.id),tournamentId:Number(found.tournament_id),title:found.title,
+    table:Number(found.table_no),revision:found.revision,state:playerView(found.state,req.userId),
+    lobbyStatus:found.lobby_status,joinedCount:joined.length,totalCount:found.state.seats.length,
+    waitingFor:found.state.seats.filter(p=>!joined.includes(Number(p.userId))).map(p=>p.name),
+    deadlineAt:new Date(lobbyDeadline(found.scheduled_at)).toISOString()},
+    enabled:true,serverNow:Date.now()});
 }));
+// Heartbeat uniquement depuis le plateau ouvert. L'ordre d'arrivee est fixe cote base.
+tournamentQualificationRouter.post('/qualifications/:id/presence',requireSession,route(async(req,res)=>{
+  if(!realQualificationEnabled())throw fail(403,'Qualifications non ouvertes.');
+  if(!['here','away'].includes(req.body?.state))throw fail(400,'Presence invalide.');
+  await ensureQualificationTables();
+  const id=numericId(req.params.id), c=await pool.connect();
+  try{
+    await c.query('BEGIN');
+    const row=(await c.query('SELECT * FROM maf_tournament_qualification_matches WHERE id=$1 FOR UPDATE',[id])).rows[0];
+    if(!row)throw fail(404,'Plateau inconnu.');
+    const seats=row.state.seats;
+    if(!seats.some(s=>Number(s.userId)===req.userId))throw fail(403,'Tu ne participes pas a ce plateau.');
+    if(row.lobby_status==='waiting'){
+      if(req.body.state==='here'){
+        if(Date.now()>=lobbyDeadline(row.scheduled_at))throw fail(409,'Les cinq minutes pour rejoindre sont terminees.');
+        await c.query(`INSERT INTO maf_tournament_qualification_presence(match_id,user_id)
+          VALUES($1,$2) ON CONFLICT(match_id,user_id) DO UPDATE SET last_seen_at=now()`,[id,req.userId]);
+      }
+    } else if(row.lobby_status==='playing' && row.state.game.phase!=='over'){
+      let match=structuredClone(row.state);
+      const members=seats.map(s=>({id:s.userId}));
+      if(setPresence(match.game,members,req.userId,req.body.state)){
+        await c.query(`UPDATE maf_tournament_qualification_matches SET state=$2::jsonb,updated_at=now()
+          WHERE id=$1`,[id,JSON.stringify(match)]);
+      }
+    }
+    await c.query('COMMIT');res.json({ok:true,serverNow:Date.now()});
+  }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
+}));
+// La maintenance traite le forfait et la limite de tour meme si tout le monde ferme son navigateur.
+let maintaining;
+export function maintainQualificationMatches(){
+  if(maintaining)return maintaining;
+  maintaining=(async()=>{
+    if(!realQualificationEnabled())return {enabled:false};
+    await ensureQualificationTables();await ensureFinalistsTables();
+    const rows=(await pool.query(`SELECT id FROM maf_tournament_qualification_matches
+      WHERE lobby_status IN ('waiting','playing') ORDER BY id DESC LIMIT 150`)).rows;
+    let updated=0;
+    for(const {id} of rows){
+      const c=await pool.connect();
+      try{
+        await c.query('BEGIN');
+        const row=(await c.query('SELECT * FROM maf_tournament_qualification_matches WHERE id=$1 FOR UPDATE',[id])).rows[0];
+        if(!row || !['waiting','playing'].includes(row.lobby_status)){await c.query('COMMIT');continue;}
+        const now=Date.now();let next=row.state,status=row.lobby_status,changed=false;
+        if(status==='waiting'){
+          const attendance=(await c.query("SELECT user_id FROM maf_tournament_qualification_presence WHERE match_id=$1 AND last_seen_at>=now()-interval '20 seconds'",[id]))
+            .rows.map(r=>Number(r.user_id));
+          const outcome=lobbyOutcome(next.seats,attendance,row.scheduled_at,now);
+          if(outcome==='play'||outcome==='forfeit'){
+            next=launchWithAbsences(next,attendance,now);
+            status=next.game.phase==='over'?'finished':'playing';changed=true;
+          } else if(outcome==='attention'){status='attention';changed=true;}
+        } else {
+          const members=next.seats.map(s=>({id:s.userId}));
+          const presence=expirePresence(structuredClone(next.game),members,now);
+          const clock=tickTurnClock(presence.game,{now,autoEnd:true});
+          if(presence.changed||clock.changed){next={...next,game:clock.game};changed=true;}
+          if(next.game.phase==='over')status='finished';
+        }
+        if(changed){
+          await c.query(`UPDATE maf_tournament_qualification_matches
+            SET state=$2::jsonb,lobby_status=$3,revision=revision+1,updated_at=now() WHERE id=$1`,
+            [id,JSON.stringify(next),status]);
+          await recordWinnerForMatch(c,{...row,state:next});updated++;
+        }
+        await c.query('COMMIT');
+      }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
+    }
+    return {enabled:true,updated};
+  })().finally(()=>{maintaining=null;});
+  return maintaining;
+}
 tournamentQualificationRouter.post('/qualifications/:id/action',requireSession,route(async(req,res)=>{
   if(!realQualificationEnabled())throw fail(403,'Qualifications non ouvertes.');
   await ensureQualificationTables();
@@ -167,8 +269,12 @@ tournamentQualificationRouter.post('/qualifications/:id/action',requireSession,r
     await c.query('BEGIN');
     const row=(await c.query('SELECT * FROM maf_tournament_qualification_matches WHERE id=$1 FOR UPDATE',[id])).rows[0];
     if(!row)throw fail(404,'Plateau introuvable.');
+    if(row.lobby_status!=='playing')throw fail(409,'Plateau en attente des joueurs ou deja termine.');
     if(row.revision!==expectedRevision)throw fail(409,'Cette action a deja ete remplacee. Recharge le plateau.');
+    if(row.state.game.presence?.away?.[String(req.userId)]!==undefined)
+      throw fail(409,'Rejoins ton plateau avant de jouer.');
     const next=playQualificationAction(row.state,{userId:req.userId,action:req.body?.action,square:req.body?.square});
+    normalizeTurnClock(next.game);
     const result=await c.query(`UPDATE maf_tournament_qualification_matches SET state=$2::jsonb,revision=revision+1,updated_at=now()
       WHERE id=$1 RETURNING revision`,[id,JSON.stringify(next)]);
     await recordWinnerForMatch(c,{...row,state:next});
