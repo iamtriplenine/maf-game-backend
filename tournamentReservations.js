@@ -4,6 +4,7 @@
 // Aucune annulation, aucun remboursement et aucune recompense dans cette etape.
 import { pool } from './db.js';
 import { requireSession } from './auth.js';
+import { publicTournamentBookingsEnabled } from './tournamentLaunchPolicy.js';
 
 const ENTRY_FEE = 500;
 
@@ -37,6 +38,7 @@ export function mountReservations(router, { select, view, fail, run, owner }) {
       const row = (await client.query('SELECT * FROM maf_tournaments WHERE id=$1 FOR UPDATE', [id])).rows[0];
       if (!row) throw fail(404, 'Tournoi introuvable.');
       if (row.revision !== revision) throw fail(409, 'Ce tournoi a été modifié ailleurs. Recharge la liste avant de réessayer.');
+      if (open && !publicTournamentBookingsEnabled()) throw fail(409, 'Ouverture payante suspendue : qualifications, finale et paiements doivent etre valides en preproduction avant activation.');
       if (open && row.status !== 'published') throw fail(409, 'Publie l’annonce avant d’ouvrir les réservations.');
       if (open && Date.parse(row.starts_at) <= Date.now()) throw fail(409, 'L’heure des qualifications est passée.');
       await client.query('UPDATE maf_tournaments SET registration_open=$2,revision=revision+1,updated_at=now() WHERE id=$1', [id, open]);
@@ -61,6 +63,7 @@ export function mountReservations(router, { select, view, fail, run, owner }) {
       // Le verrou du tournoi serialise toutes les reservations : la capacite ne peut pas etre depassee.
       const t = (await client.query('SELECT * FROM maf_tournaments WHERE id=$1 FOR UPDATE', [id])).rows[0];
       if (!t || t.status !== 'published') throw fail(404, 'Tournoi introuvable.');
+      if (!publicTournamentBookingsEnabled()) throw fail(409, 'Reservations payantes suspendues pendant la validation du grand tournoi.');
       if (!t.registration_open) throw fail(409, 'Les inscriptions ne sont pas ouvertes.');
       if (Date.parse(t.starts_at) <= Date.now()) throw fail(409, 'Les inscriptions sont closes : les qualifications ont commencé.');
       const mine = (await client.query(

@@ -1,5 +1,7 @@
 // Etape 1 : annonces uniquement. Aucune route de reservation ou de mouvement de solde.
 import { Router } from 'express';
+import { PUBLIC_REWARD_SCENARIOS } from './tournamentPublicRewards.js';
+import { publicTournamentBookingsEnabled } from './tournamentLaunchPolicy.js';
 import { pool } from './db.js';
 import { ensureTable, requireSession } from './auth.js';
 import { ensureReservationTables, mountReservations } from './tournamentReservations.js'; // MAF_TOURNOI_ETAPE2_V1
@@ -47,12 +49,14 @@ export function ensureTournaments() {
 }
 const select = `SELECT t.*, (SELECT count(*)::int FROM maf_tournament_entries e
   WHERE e.tournament_id=t.id AND e.status='reserved') AS registered FROM maf_tournaments t`;
-const registrationIsOpen = row => row.status === 'published' && row.registration_open === true && Date.parse(row.starts_at) > Date.now();
+const registrationIsOpen = row => publicTournamentBookingsEnabled() && row.status === 'published' && row.registration_open === true && Date.parse(row.starts_at) > Date.now();
 function view(row) {
   return { id: row.id, game: row.game, title: row.title, description: row.description,
     startsAt: new Date(row.starts_at).toISOString(), finalAt: new Date(row.final_at).toISOString(),
     status: row.status, capacity: row.capacity, entryFee: row.entry_fee,
-    registered: Number(row.registered || 0), revision: row.revision, registrationOpen: registrationIsOpen(row), full: Number(row.registered || 0) >= row.capacity,
+    registered: Number(row.registered || 0), revision: row.revision, registrationOpen: registrationIsOpen(row),
+    publicBookingsEnabled: publicTournamentBookingsEnabled(), registrationConfigured: row.registration_open === true, full: Number(row.registered || 0) >= row.capacity,
+    rewardScenarios: PUBLIC_REWARD_SCENARIOS,
     rewards: { real: [2000, 1600, 1500, 1400], eliminatedReal: 62.5, bonusEach: 100,
       participantSkins: 1, finalistSkins: 2 } };
 }
