@@ -1,13 +1,14 @@
-// Tirage de qualifications MAF Monopoly. Fonction pure testable : aucune transaction.
+// Tirage des qualifications : les formats 10, 14, 15, 18, 19 et 20
+// sont les seuls a pouvoir produire des plateaux. Pas de transaction ici.
 import crypto from 'node:crypto';
+import { tournamentSeats } from './tournamentDynamicBudget.js';
 
 export const TABLE_COUNT = 4;
 export const SEATS_PER_TABLE = 5;
-export const REQUIRED_PLAYERS = TABLE_COUNT * SEATS_PER_TABLE;
+export const REQUIRED_PLAYERS = TABLE_COUNT * SEATS_PER_TABLE; // capacite maximum
 
 export function qualificationDraw(participants, randomInt = crypto.randomInt) {
-  if (!Array.isArray(participants) || participants.length !== REQUIRED_PLAYERS)
-    throw new Error('Le tournoi doit comporter exactement vingt inscrits.');
+  if (!Array.isArray(participants)) throw new Error('Liste des inscrits invalide.');
   const unique = new Set();
   for (const p of participants) {
     if (!p || !Number.isSafeInteger(p.userId) || p.userId <= 0 ||
@@ -15,15 +16,19 @@ export function qualificationDraw(participants, randomInt = crypto.randomInt) {
       throw new Error('Liste des inscrits invalide ou repetee.');
     unique.add(p.userId);
   }
+  const seats = tournamentSeats(participants.map(p => p.userId));
+  if (seats.status !== 'eligible' || seats.refundIds.length !== 0)
+    throw new Error('Effectif incompatible : rembourser les derniers inscrits avant le tirage.');
   const shuffled = participants.map(p => ({userId:p.userId,name:p.name.trim()}));
-  // Fisher-Yates, crypto.randomInt: entier uniforme dans [0, i] inclus.
   for (let i=shuffled.length-1; i>0; i--) {
     const j = randomInt(i + 1);
     if (!Number.isSafeInteger(j) || j<0 || j>i) throw new Error('Generateur de tirage invalide.');
     [shuffled[i],shuffled[j]]=[shuffled[j],shuffled[i]];
   }
-  return Array.from({length:TABLE_COUNT},(_,k)=>({
-    table: k+1,
-    players: shuffled.slice(k*SEATS_PER_TABLE,(k+1)*SEATS_PER_TABLE).map((p,seat)=>({...p,seat}))
-  }));
+  let offset = 0;
+  return seats.groupSizes.map((size,k) => {
+    const group = {table:k+1,players:shuffled.slice(offset,offset+size).map((p,seat)=>({...p,seat}))};
+    offset += size;
+    return group;
+  });
 }

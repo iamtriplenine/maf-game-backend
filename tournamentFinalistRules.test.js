@@ -42,3 +42,13 @@ test('simulation 0 a 4 finalistes, sans donnees reelles',()=>{
   assert.throws(()=>demoFinalistLobby(5),/invalide/);
   assert.throws(()=>demoFinalistLobby('2'),/invalide/);
 });
+
+for(const tables of [2,3,4]) test(`salon pret pour ${tables} plateaux certifies`,()=>{
+  const matches=Array.from({length:tables},(_,i)=>{
+    const state=createQualificationGame(users,()=>0.5);state.game.phase='over';state.game.winner=i;
+    return {id:100+i,tournament_id:8,table_no:i+1,state};
+  });
+  const finals=matches.map(m=>({table_no:m.table_no,match_id:m.id,user_id:m.state.seats[m.state.game.winner].userId}));
+  const out=finalistOverview(matches,finals);
+  assert.equal(out.ready,true);assert.equal(out.qualifiedCount,tables);
+});

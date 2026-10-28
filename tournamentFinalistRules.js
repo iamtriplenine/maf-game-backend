@@ -41,7 +41,10 @@ export function finalistOverview(matches = [], finalists = []) {
       winner: final ? {name:winner.name,table} : null};
   });
   return {tables, finalists:tables.filter(t=>t.winner).map(t=>t.winner),
-    qualifiedCount: tables.filter(t=>t.status==='qualified').length, ready:tables.every(t=>t.status==='qualified')};
+    qualifiedCount: tables.filter(t=>t.status==='qualified').length,
+    ready:byTable.size >= 2 && byTable.size <= 4 &&
+      Array.from({length:byTable.size},(_,i)=>byTable.has(i+1)).every(Boolean) &&
+      matches.every(m=>saved.has(Number(m.table_no))) };
 }
 
 // Version de demonstration reproductible : 20 joueurs fictifs. AUCUNE ecriture.

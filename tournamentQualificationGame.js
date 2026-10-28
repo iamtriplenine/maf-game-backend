@@ -2,12 +2,16 @@
 // Aucun endpoint, aucune reservation ni operation sur le portefeuille n'est active ici.
 import { createGame, rollDice, buy, build, sell, endTurn, giveUp } from './engine.js';
 
-export const QUALIFICATION_PLAYERS = 5;
+export const QUALIFICATION_PLAYERS = 5; // nombre maximum par plateau
+const validSize = count => count === 4 || count === 5;
+const validMatch = match => validSize(match?.seats?.length) &&
+  match.format === `monopoly_qualification_${match.seats.length}` &&
+  match.game?.players?.length === match.seats.length;
 const ACTIONS = new Set(['roll', 'buy', 'build', 'sell', 'end', 'abandon']);
 
 export function createQualificationGame(participants, rng = Math.random) {
-  if (!Array.isArray(participants) || participants.length !== QUALIFICATION_PLAYERS) {
-    throw new Error('Une qualification Monopoly exige exactement cinq joueurs.');
+  if (!Array.isArray(participants) || !validSize(participants.length)) {
+    throw new Error('Une qualification Monopoly exige quatre ou cinq joueurs.');
   }
   const seats = participants.map((person, seat) => ({
     userId: person?.userId,
@@ -16,18 +20,18 @@ export function createQualificationGame(participants, rng = Math.random) {
   }));
   if (seats.some(p => !Number.isSafeInteger(p.userId) || p.userId <= 0 ||
       typeof p.name !== 'string' || !p.name.trim() || p.name.length > 80) ||
-      new Set(seats.map(p => p.userId)).size !== QUALIFICATION_PLAYERS) {
-    throw new Error('Les cinq participants doivent etre distincts, identifiables et valides.');
+      new Set(seats.map(p => p.userId)).size !== seats.length) {
+    throw new Error('Les participants doivent etre distincts, identifiables et valides.');
   }
   return {
-    format: 'monopoly_qualification_5',
+    format: `monopoly_qualification_${seats.length}`,
     seats,
     game: createGame({ names: seats.map(p => p.name.trim()), dice: 2, rng }),
   };
 }
 
 export function qualificationWinnerId(match) {
-  if (!match || match.format !== 'monopoly_qualification_5' || match.seats?.length !== QUALIFICATION_PLAYERS)
+  if (!validMatch(match))
     throw new Error('Qualification invalide.');
   if (match.game?.phase !== 'over' || !Number.isInteger(match.game.winner) || match.game.winner < 0) return null;
   return match.seats[match.game.winner]?.userId ?? null;
@@ -36,8 +40,7 @@ export function qualificationWinnerId(match) {
 // Fonction pure. La future route serveur devra verrouiller la partie et conserver
 // un numero de version afin de rejeter deux actions concurrentes (etape 5).
 export function playQualificationAction(match, { userId, action, square } = {}, rng = Math.random) {
-  if (!match || match.format !== 'monopoly_qualification_5' ||
-      match.seats?.length !== QUALIFICATION_PLAYERS || match.game?.players?.length !== QUALIFICATION_PLAYERS)
+  if (!validMatch(match))
     throw new Error('Qualification invalide.');
   if (!ACTIONS.has(action)) throw new Error('Action non autorisee.');
   if (match.game.phase === 'over') throw new Error('La qualification est terminee.');

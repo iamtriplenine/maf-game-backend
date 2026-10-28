@@ -92,15 +92,25 @@ export async function cancelTournament(id, reason, expectedRevision = null) {
       SELECT user_id FROM maf_tournament_entries
       WHERE tournament_id=$1 AND status='reserved' ORDER BY user_id FOR UPDATE`, [id]
     )).rows;
-    if (reason === 'incomplete' && entries.length >= Number(tournament.capacity)) {
+    if (reason === 'incomplete' && entries.length >=
+        (process.env.MAF_TOURNAMENT_REAL_START_ENABLED === 'true' ? 10 : Number(tournament.capacity))) {
       await c.query('COMMIT');
       return null;
     }
     // Apres un depart presume complet, eviter un remboursement qui
     // contredirait les gains d'une partie eventuellement en cours.
     if (reason === 'owner_deleted' && new Date(tournament.starts_at).getTime() <= Date.now()
-        && entries.length >= Number(tournament.capacity))
+        && entries.length >= 10)
       throw fail(409, 'Tournoi complet deja arrive a son heure : suppression bloquee pour proteger les gains.');
+    // Une qualification deja lancee ne doit JAMAIS etre remboursee
+    // par la tache d'annulation, meme si le feature flag est desactive plus tard.
+    const matchTable = (await c.query(`SELECT to_regclass('maf_tournament_qualification_matches') AS name`)).rows[0]?.name;
+    const started = matchTable ? await c.query(`SELECT 1 FROM maf_tournament_qualification_matches
+      WHERE tournament_id=$1 LIMIT 1`, [id]) : {rowCount:0};
+    if (started.rowCount) {
+      if (reason === 'incomplete') { await c.query('COMMIT'); return null; }
+      throw fail(409, 'Qualifications deja lancees : suppression bloquee.');
+    }
     if (Number(tournament.entry_fee) !== 500)
       throw fail(409, 'Mise differente de 500 F : remboursement bloque.');
 
@@ -134,11 +144,12 @@ export function maintainTournamentCancellations() {
   if (running) return running;
   running = (async () => {
     await ensureTournamentCancellation();
+    const minPlayers = process.env.MAF_TOURNAMENT_REAL_START_ENABLED === 'true' ? 10 : 20;
     const { rows } = await pool.query(`SELECT t.id FROM maf_tournaments t
       WHERE t.status='published' AND t.cancelled_at IS NULL AND t.starts_at <= now()
         AND (SELECT count(*) FROM maf_tournament_entries e
-             WHERE e.tournament_id=t.id AND e.status='reserved') < t.capacity
-      ORDER BY t.starts_at,t.id LIMIT 100`);
+             WHERE e.tournament_id=t.id AND e.status='reserved') < $1
+      ORDER BY t.starts_at,t.id LIMIT 100`, [minPlayers]);
     let cancelled = 0;
     for (const row of rows) {
       if (await cancelTournament(Number(row.id), 'incomplete')) cancelled++;

@@ -15,14 +15,15 @@ export function nextFinalSlot(finalAt, now, intervalMs = FINAL_DELAY_MS) {
   // Une plage deja depassee ne peut pas demarrer retroactivement.
   return start + Math.ceil((current - start) / intervalMs) * intervalMs;
 }
-export function finalePreview({ finalAt, now, qualifiedCount, qualificationsComplete, started = false }) {
+export function finalePreview({ finalAt, now, qualifiedCount, qualificationsComplete, started = false, expectedFinalists = 4 }) {
   const start = timestamp(finalAt), current = timestamp(now);
-  if (!Number.isInteger(qualifiedCount) || qualifiedCount < 0 || qualifiedCount > 4)
+  if (!Number.isInteger(expectedFinalists) || expectedFinalists < 2 || expectedFinalists > 4 ||
+      !Number.isInteger(qualifiedCount) || qualifiedCount < 0 || qualifiedCount > expectedFinalists)
     throw new Error('Nombre de finalistes invalide.');
   if (typeof qualificationsComplete !== 'boolean' || typeof started !== 'boolean')
     throw new Error('Etat de qualification invalide.');
   if (started) return {status:'started',plannedAt:new Date(start).toISOString(),nextAt:null,delayMinutes:0,ready:true};
-  const ready = qualifiedCount === 4 && qualificationsComplete;
+  const ready = qualifiedCount === expectedFinalists && qualificationsComplete;
   const at = current <= start ? start : nextFinalSlot(start, current);
   // Au passage d'un horaire, si les qualifications sont encore inachevees,
   // on passe a la prochaine plage de cinq minutes.
@@ -34,14 +35,14 @@ export function finalePreview({ finalAt, now, qualifiedCount, qualificationsComp
   };
 }
 export function createFinaleMatch(finalists, makeGame) {
-  if (!Array.isArray(finalists) || finalists.length !== 4) throw new Error('Quatre finalistes obligatoires.');
+  if (!Array.isArray(finalists) || finalists.length < 2 || finalists.length > 4) throw new Error('De deux a quatre finalistes obligatoires.');
   const ordered=[...finalists].sort((a,b)=>a.table-b.table);
   if(ordered.some((x,i)=>x.table!==i+1||!Number.isSafeInteger(x.userId)||x.userId<1||
       typeof x.name!=='string'||!x.name.trim()||x.name.length>80)||
-      new Set(ordered.map(x=>x.userId)).size!==4) throw new Error('Finalistes invalides ou dupliques.');
+      new Set(ordered.map(x=>x.userId)).size!==ordered.length) throw new Error('Finalistes invalides ou dupliques.');
   const seats=ordered.map(({userId,name,table},seat)=>({seat,table,userId,name:name.trim()}));
   const game=makeGame({names:seats.map(s=>s.name),dice:2});
-  if (!game || !Array.isArray(game.players) || game.players.length!==4)
+  if (!game || !Array.isArray(game.players) || game.players.length!==ordered.length)
     throw new Error('Moteur finale a quatre joueurs invalide.');
-  return {format:'monopoly_final_4',seats,game};
+  return {format:`monopoly_final_${ordered.length}`,seats,game};
 }

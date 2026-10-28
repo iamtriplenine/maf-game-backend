@@ -1,9 +1,10 @@
 // Etape 7 : orchestration de la finale. Demonstration owner en lecture seule.
-// Le jeu reel exige qualification activee ET verification de presence des 4 joueurs.
+// Le jeu reel exige qualification activee et presence des 2 a 4 finalistes.
 import { Router } from 'express';
 import { pool } from './db.js';
 import { requireSession } from './auth.js';
 import { createGame } from './engine.js';
+import { tournamentSeats } from './tournamentDynamicBudget.js';
 import { ensureQualificationTables } from './tournamentQualificationStart.js';
 import { ensureFinalistsTables } from './tournamentFinalistStore.js';
 import { finalistOverview, finalistFromMatch } from './tournamentFinalistRules.js';
@@ -46,9 +47,9 @@ export function ensureFinaleTables(){
   })().catch(e=>{initialized=null;throw e;});
   return initialized;
 }
-function validFinalists(matches, finalists){
+function validFinalists(matches, finalists, expectedCount){
   const overview=finalistOverview(matches,finalists);
-  if(!overview.ready || matches.length!==4 || finalists.length!==4 ||
+  if(!overview.ready || matches.length!==expectedCount || finalists.length!==expectedCount ||
     matches.some(m=>m.state?.game?.phase!=='over')) return null;
   return finalists.map(f=>{
     const match=matches.find(m=>Number(m.table_no)===Number(f.table_no));
@@ -58,18 +59,19 @@ function validFinalists(matches, finalists){
     return {table:final.table,userId:final.userId,name:final.name};
   });
 }
-function projectedStatus(t, matches, finalists, schedule, finalMatch, now){
-  const count=finalists.length, complete=matches.length===4 && matches.every(x=>x.state?.game?.phase==='over');
+function projectedStatus(t, matches, finalists, schedule, finalMatch, now, expectedCount){
+  const count=finalists.length, complete=matches.length===expectedCount && matches.every(x=>x.state?.game?.phase==='over');
   const projection=finalePreview({finalAt:t.final_at,now,qualifiedCount:Math.min(4,count),
-    qualificationsComplete:complete,started:!!finalMatch});
+    qualificationsComplete:complete,started:!!finalMatch,expectedFinalists:expectedCount});
   return {
     tournamentId:Number(t.id),title:t.title,plannedAt:new Date(t.final_at).toISOString(),
     nextAt:schedule ? (schedule.status==='started'?null:new Date(schedule.next_start_at).toISOString()):projection.nextAt,
     status:finalMatch?'started':schedule?.status==='pending'?'waiting':projection.status,
+    expectedFinalists:expectedCount,
     startedAt:finalMatch?.started_at??null,qualifiedCount:count,
     qualificationsComplete:complete,finalists:finalists.map(f=>({table:Number(f.table_no)})),
     realFinaleEnabled:finaleEnabled(),presenceRequired:true,
-    disclaimer:'Les quatre finalistes doivent signaler leur presence avant un depart reel.'
+    disclaimer:`Les ${expectedCount} finalistes doivent signaler leur presence avant un depart reel.`
   };
 }
 export async function startFinaleIfDue(tournamentId, now = new Date()) {
@@ -85,7 +87,10 @@ export async function startFinaleIfDue(tournamentId, now = new Date()) {
     // Ne pas creer de finale sans qualifications; ne pas toucher aux brouillons.
     const matches=(await c.query(`SELECT m.id,m.tournament_id,m.table_no,m.state
       FROM maf_tournament_qualification_matches m WHERE tournament_id=$1 ORDER BY table_no FOR UPDATE`,[id])).rows;
-    if(matches.length!==4){await c.query('COMMIT');return {skipped:true};}
+    const active=(await c.query(`SELECT user_id FROM maf_tournament_entries
+      WHERE tournament_id=$1 AND status='reserved' ORDER BY created_at,user_id FOR UPDATE`,[id])).rows;
+    const expected=tournamentSeats(active.map(x=>Number(x.user_id))).groupSizes.length;
+    if(expected<2 || matches.length!==expected){await c.query('COMMIT');return {skipped:true};}
     await c.query(`INSERT INTO maf_tournament_final_schedules(tournament_id,planned_at,next_start_at)
       VALUES($1,$2,$2) ON CONFLICT(tournament_id) DO NOTHING`,[id,t.final_at]);
     const schedule=(await c.query(`SELECT * FROM maf_tournament_final_schedules
@@ -99,13 +104,13 @@ export async function startFinaleIfDue(tournamentId, now = new Date()) {
     }
     const finalists=(await c.query(`SELECT table_no,user_id,match_id
       FROM maf_tournament_finalists WHERE tournament_id=$1 ORDER BY table_no`,[id])).rows;
-    const ready=validFinalists(matches,finalists);
+    const ready=validFinalists(matches,finalists,expected);
     let present=false;
     if(ready){
       const p=(await c.query(`SELECT user_id FROM maf_tournament_final_presence
         WHERE tournament_id=$1 AND present_at >= $2::timestamptz
         ORDER BY user_id`,[id,new Date(time.getTime()-PING_MS).toISOString()])).rows;
-      present=p.length===4 && ready.every(f=>p.some(x=>Number(x.user_id)===f.userId));
+      present=p.length===expected && ready.every(f=>p.some(x=>Number(x.user_id)===f.userId));
     }
     if(!ready||!present){
       const next=nextFinalSlot(t.final_at,time.getTime()+1);
@@ -129,7 +134,7 @@ export function maintainFinaleStarts(){
     const {rows}=await pool.query(`SELECT t.id FROM maf_tournaments t
       WHERE t.status='published' AND t.deleted_at IS NULL AND t.cancelled_at IS NULL
       AND t.final_at <= now()
-      AND (SELECT count(*) FROM maf_tournament_qualification_matches m WHERE m.tournament_id=t.id)=4
+      AND (SELECT count(*) FROM maf_tournament_qualification_matches m WHERE m.tournament_id=t.id) BETWEEN 2 AND 4
       AND NOT EXISTS(SELECT 1 FROM maf_tournament_final_matches f WHERE f.tournament_id=t.id)
       ORDER BY t.final_at,t.id LIMIT 100`);
     let started=0;
@@ -143,7 +148,8 @@ tournamentFinaleRouter.post('/qualifications/finale/owner/preview',requireSessio
   if(typeof b.finalAt!=='string'||!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/.test(b.finalAt)||
     !Number.isSafeInteger(b.now)||typeof b.qualificationsComplete!=='boolean')throw fail(400,'Parametres de demo invalides.');
   res.json({type:'demo',...finalePreview({finalAt:b.finalAt,now:b.now,
-    qualifiedCount:b.qualifiedCount,qualificationsComplete:b.qualificationsComplete}),serverNow:Date.now()});
+    qualifiedCount:b.qualifiedCount,qualificationsComplete:b.qualificationsComplete,
+    expectedFinalists:b.expectedFinalists??4}),serverNow:Date.now()});
 }));
 tournamentFinaleRouter.get('/qualifications/finale/owner/:id',requireSession,handler(async(req,res)=>{
   await owner(req);await ensureFinaleTables();const id=positiveId(req.params.id);
@@ -153,7 +159,10 @@ tournamentFinaleRouter.get('/qualifications/finale/owner/:id',requireSession,han
   const finalists=(await pool.query('SELECT table_no FROM maf_tournament_finalists WHERE tournament_id=$1 ORDER BY table_no',[id])).rows;
   const schedule=(await pool.query('SELECT * FROM maf_tournament_final_schedules WHERE tournament_id=$1',[id])).rows[0];
   const finalMatch=(await pool.query('SELECT started_at FROM maf_tournament_final_matches WHERE tournament_id=$1',[id])).rows[0];
-  res.json({...projectedStatus(t,matches,finalists,schedule,finalMatch,Date.now()),serverNow:Date.now()});
+  const active=(await pool.query(`SELECT user_id FROM maf_tournament_entries
+    WHERE tournament_id=$1 AND status='reserved' ORDER BY created_at,user_id`,[id])).rows;
+  const expected=tournamentSeats(active.map(x=>Number(x.user_id))).groupSizes.length || 4;
+  res.json({...projectedStatus(t,matches,finalists,schedule,finalMatch,Date.now(),expected),serverNow:Date.now()});
 }));
 // Heartbeat reel ; route inaccessible lorsque le mode joueur n'est pas ouvert.
 tournamentFinaleRouter.post('/qualifications/finale/:id/presence',requireSession,handler(async(req,res)=>{
@@ -163,7 +172,7 @@ tournamentFinaleRouter.post('/qualifications/finale/:id/presence',requireSession
     AND deleted_at IS NULL AND cancelled_at IS NULL`,[id])).rows[0];
   if(!tournament)throw fail(404,'Tournoi indisponible.');
   const member=(await pool.query('SELECT 1 FROM maf_tournament_finalists WHERE tournament_id=$1 AND user_id=$2',[id,req.userId])).rows[0];
-  if(!member)throw fail(403,'Tu ne fais pas partie des quatre finalistes.');
+  if(!member)throw fail(403,'Tu ne fais pas partie des finalistes.');
   await pool.query(`INSERT INTO maf_tournament_final_presence(tournament_id,user_id,present_at)
     VALUES($1,$2,now()) ON CONFLICT(tournament_id,user_id) DO UPDATE SET present_at=now()`,[id,req.userId]);
   res.json({ok:true});

@@ -1,4 +1,4 @@
-// Etape 5 : tirage persistant et creation atomique des quatre plateaux.
+// Tirage persistant, remboursement du surplus et creation atomique de 2 a 4 plateaux.
 // IMPORTANT : le lancement REEL est volontairement desactive tant que le
 // parcours joueur des qualifications n'a pas ete valide.
 import { Router } from 'express';
@@ -7,6 +7,7 @@ import { requireSession } from './auth.js';
 import { ensureTournamentCancellation } from './tournamentCancellation.js';
 import { createQualificationGame, playQualificationAction } from './tournamentQualificationGame.js';
 import { qualificationDraw, REQUIRED_PLAYERS } from './tournamentDraw.js';
+import { tournamentSeats } from './tournamentDynamicBudget.js';
 import { ensureFinalistsTables, recordWinnerForMatch } from './tournamentFinalistStore.js';
 
 export const tournamentQualificationRouter = Router();
@@ -33,6 +34,12 @@ export function ensureQualificationTables(){
     try {
       await c.query('BEGIN');
       await c.query('SELECT pg_advisory_xact_lock(62498465)');
+      // Le meme journal de remboursement empeche tout double credit.
+      await c.query(`ALTER TABLE maf_tournament_refunds
+        DROP CONSTRAINT IF EXISTS maf_tournament_refunds_reason_check`);
+      await c.query(`ALTER TABLE maf_tournament_refunds
+        ADD CONSTRAINT maf_tournament_refunds_reason_check
+        CHECK(reason IN ('owner_deleted','incomplete','late_incomplete_group'))`);
       await c.query(`CREATE TABLE IF NOT EXISTS maf_tournament_qualification_matches (
         id bigserial PRIMARY KEY,
         tournament_id integer NOT NULL REFERENCES maf_tournaments(id),
@@ -75,17 +82,38 @@ export async function startQualificationTournament(id){
     }
     const existing=(await c.query('SELECT table_no FROM maf_tournament_qualification_matches WHERE tournament_id=$1 ORDER BY table_no',[id])).rows;
     if(existing.length){
-      if(existing.length!==4||existing.some((p,i)=>p.table_no!==i+1))throw fail(409,'Etat partiel des qualifications : intervention necessaire.');
+      const active = (await c.query(`SELECT user_id FROM maf_tournament_entries
+        WHERE tournament_id=$1 AND status='reserved' ORDER BY created_at,user_id`,[id])).rows;
+      const expected=tournamentSeats(active.map(r=>Number(r.user_id))).groupSizes.length;
+      if(existing.length!==expected||existing.some((p,i)=>p.table_no!==i+1))throw fail(409,'Etat partiel des qualifications : intervention necessaire.');
       await c.query('COMMIT');return false;
     }
-    const rows=(await c.query(`SELECT e.user_id, u.pseudo FROM maf_tournament_entries e
+    const rows=(await c.query(`SELECT e.user_id,e.fee_paid,u.pseudo FROM maf_tournament_entries e
       JOIN maf_users u ON u.id=e.user_id WHERE e.tournament_id=$1 AND e.status='reserved'
-      ORDER BY e.user_id FOR UPDATE OF e`,[id])).rows;
-    // Etape 3 gere deja l'annulation/remboursement des tournois incomplets.
-    if(rows.length!==REQUIRED_PLAYERS||Number(tournament.capacity)!==REQUIRED_PLAYERS){
-      await c.query('COMMIT');return false;
+      ORDER BY e.created_at ASC,e.user_id ASC FOR UPDATE OF e`,[id])).rows;
+    if (Number(tournament.capacity)!==REQUIRED_PLAYERS || Number(tournament.entry_fee)!==500)
+      throw fail(409,'Parametres du tournoi incompatibles.');
+    const seats=tournamentSeats(rows.map(r=>Number(r.user_id)));
+    // L'annulation sous 10 inscrits reste geree par tournamentCancellation.
+    if(seats.status==='cancel_and_refund') {await c.query('COMMIT');return false;}
+    if(rows.some(r=>Number(r.fee_paid)!==500)) throw fail(409,'Mises des inscrits incoherentes.');
+    // Remboursement atomique de la/les derniere(s) reservation(s), une seule fois.
+    for(const userId of seats.refundIds) {
+      const ledger=await c.query(`INSERT INTO maf_tournament_refunds (tournament_id,user_id,amount,reason)
+        VALUES($1,$2,500,'late_incomplete_group')
+        ON CONFLICT(tournament_id,user_id) DO NOTHING RETURNING user_id`,[id,userId]);
+      if(ledger.rowCount!==1)throw fail(409,'Remboursement de surplus deja enregistre : verification necessaire.');
+      const credit=await c.query('UPDATE maf_users SET balance=balance+500 WHERE id=$1 RETURNING id',[userId]);
+      if(credit.rowCount!==1)throw fail(409,'Compte a rembourser introuvable.');
+      const updated=await c.query(`UPDATE maf_tournament_entries SET status='refunded'
+        WHERE tournament_id=$1 AND user_id=$2 AND status='reserved'`,[id,userId]);
+      if(updated.rowCount!==1)throw fail(409,'Inscription a rembourser introuvable.');
+      await c.query(`INSERT INTO maf_wallet_audit(actor,event,details)
+        VALUES('system:tournament','tournament_surplus_refunded',$1::jsonb)`,
+        [JSON.stringify({tournament_id:id,user_id:userId,amount:500})]);
     }
-    const groups=qualificationDraw(rows.map(r=>({userId:Number(r.user_id),name:r.pseudo})));
+    const eligible=rows.filter(r=>seats.eligibleIds.includes(Number(r.user_id)));
+    const groups=qualificationDraw(eligible.map(r=>({userId:Number(r.user_id),name:r.pseudo})));
     for(const group of groups){
       const game=createQualificationGame(group.players);
       await c.query(`INSERT INTO maf_tournament_qualification_matches (tournament_id,table_no,state)

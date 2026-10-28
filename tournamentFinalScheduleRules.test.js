@@ -39,3 +39,16 @@ test('une finale deja lancee ne se relance pas en simulation',()=>{
   const p=finalePreview({finalAt:at('20:05'),now:at('20:35'),qualifiedCount:4,qualificationsComplete:true,started:true});
   assert.equal(p.status,'started');assert.equal(p.nextAt,null);
 });
+
+for(const count of [2,3,4]) test(`finale compatible avec ${count} plateaux`,()=>{
+  const finalist=Array.from({length:count},(_,i)=>({table:i+1,userId:i+10,name:`Joueur ${i+1}`}));
+  const state=createFinaleMatch(finalist,({names})=>({players:names.map(name=>({name}))}));
+  assert.equal(state.format,`monopoly_final_${count}`);
+  assert.equal(state.seats.length,count);
+  const ready=finalePreview({finalAt:at('20:05'),now:at('20:05'),
+    qualifiedCount:count,qualificationsComplete:true,expectedFinalists:count});
+  assert.equal(ready.ready,true);
+  const waiting=finalePreview({finalAt:at('20:05'),now:at('20:05'),
+    qualifiedCount:count-1,qualificationsComplete:false,expectedFinalists:count});
+  assert.equal(waiting.ready,false);
+});
