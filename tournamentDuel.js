@@ -1,5 +1,5 @@
 // Tournoi officiel a deux comptes - isolement des tournois classiques.
-// Les fonctions financieres sont INACTIVES si MAF_DUEL_REAL_ENABLED n'est pas 'true'.
+// Duels et versements actives; MAF_DUEL_EMERGENCY_STOP=true permet un arret urgent.
 // Aucune action navigateur n'autorise directement une attribution de solde.
 import crypto from 'node:crypto';
 import {Router} from 'express';
@@ -9,8 +9,8 @@ import {ensureWallet} from './wallet.js';
 import {createGame,rollDice,buy,build,sell,endTurn,giveUp} from './engine.js';
 import {validateDuel,duelRewards,duelStartDecision,participantsAreValid,DUEL_STAKE} from './tournamentDuelRules.js';
 export const tournamentDuelRouter=Router();
-export const duelPayoutEnabled=()=>process.env.MAF_DUEL_PAYOUTS_ENABLED==='true';
-export const duelEnabled=()=>process.env.MAF_DUEL_REAL_ENABLED==='true' && duelPayoutEnabled();
+export const duelPayoutEnabled=()=>process.env.MAF_DUEL_EMERGENCY_STOP!=='true';
+export const duelEnabled=()=>duelPayoutEnabled();
 const fail=(status,message)=>Object.assign(new Error(message),{status});
 const wrap=fn=>async(req,res,next)=>{try{await fn(req,res);}catch(e){
  if(e.status)return res.status(e.status).json({error:e.message});
