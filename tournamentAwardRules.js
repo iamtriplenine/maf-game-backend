@@ -63,19 +63,27 @@ export function certifiedFinalOrder(state) {
   const seats = state?.seats;
   const game = state?.game;
   const certification = state?.certification;
-  if (state?.format !== 'monopoly_final_4' || !Array.isArray(seats) || seats.length !== 4 ||
-      game?.phase !== 'over' || !Number.isInteger(game.winner) || game.winner < 0 || game.winner > 3) {
+  if (!Array.isArray(seats) || seats.length < 2 || seats.length > 4 ||
+      state?.format !== `monopoly_final_${seats.length}` ||
+      game?.phase !== 'over' || !Array.isArray(game.players) || game.players.length !== seats.length ||
+      game.players.filter(p=>!p.bankrupt).length!==1 || game.players[game.winner]?.bankrupt !== false ||
+      !Number.isInteger(game.winner) || game.winner < 0 || game.winner >= seats.length) {
     throw new Error('La finale ne dispose pas encore de resultat valide.');
   }
   if (certification?.kind !== 'server-elimination-order-v1' ||
       certification?.source !== 'authoritative-game-events' ||
-      !Array.isArray(certification.order) || certification.order.length !== 4) {
+      !Array.isArray(certification.order) || certification.order.length !== seats.length) {
     throw new Error('Classement des places 2 a 4 non certifie : paiement bloque.');
   }
-  const order = uniqueIds(certification.order, FINALISTS, 'Classement certifie');
-  const allowed = new Set(uniqueIds(seats.map(x => x.userId), FINALISTS, 'Sieges finale'));
+  const order = uniqueIds(certification.order, seats.length, 'Classement certifie');
+  const allowed = new Set(uniqueIds(seats.map(x => x.userId), seats.length, 'Sieges finale'));
   if (order.some(id => !allowed.has(id)) || order[0] !== seats[game.winner].userId) {
     throw new Error('Le classement certifie ne correspond pas au vainqueur du moteur.');
   }
+  if (!Array.isArray(state.eliminationOrder) || state.eliminationOrder.length !== seats.length-1 ||
+      order.slice(1).some((id,i)=>id!==state.eliminationOrder[seats.length-2-i]))
+    throw new Error('Historique serveur des eliminations non coherent : paiement bloque.');
+  if(state.eliminationOrder.some(id=>{const seat=seats.findIndex(x=>x.userId===id);return seat<0 || game.players[seat].bankrupt!==true;}))
+    throw new Error('Historique des faillites incompatible avec le moteur.');
   return order;
 }

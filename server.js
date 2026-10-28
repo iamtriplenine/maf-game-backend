@@ -7,7 +7,7 @@ import { tournamentGiftRouter, maintainTournamentGiftClock } from "./tournamentG
 import { tournamentQualificationRouter, maintainQualificationStarts, maintainQualificationMatches } from "./tournamentQualificationStart.js";
 import { tournamentFinalistsRouter, maintainFinalistArrivals } from "./tournamentFinalists.js";
 import { tournamentFinaleRouter, maintainFinaleStarts, maintainFinaleMatches } from "./tournamentFinale.js";
-import { tournamentAwardsRouter } from "./tournamentAwards.js";
+import { tournamentAwardsRouter, maintainTournamentAwardCredits } from "./tournamentAwards.js";
 import { tournamentSkinsRouter } from "./tournamentSkins.js";
 import { tournamentCancellationRouter, maintainTournamentCancellations } from "./tournamentCancellation.js";
 import { pool } from "./db.js";
@@ -112,6 +112,7 @@ setInterval(() => { void maintainFinaleStarts().catch(e => console.error('finale
 setInterval(() => { void maintainFinaleMatches().catch(e => console.error('finale live:',e.message)); },5000).unref();
 setInterval(() => { void maintainTournamentGiftClock().catch(e => console.error('tournament gifts clock:',e.message)); },30000).unref();
 void maintainFinaleStarts().catch(e => console.error('finale setup:',e.message));
+setInterval(() => { void maintainTournamentAwardCredits().catch(e => console.error('tournoi recompenses:',e.message)); },30000).unref();
 
 // Duel programme: rattrapage apres reveil, redemarrage et indisponibilite temporaire.
 setInterval(() => { void maintainTournamentDuels().catch(e => console.error("duel maintenance:",e.message)); },30000).unref();

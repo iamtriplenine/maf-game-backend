@@ -53,13 +53,13 @@ export async function prepareTournamentSkinEntitlements(tournamentId){
     if(!batch) throw fail(409,'Classement certifie non prepare.');
     const entries=(await c.query(`SELECT user_id FROM maf_tournament_entries WHERE tournament_id=$1 AND status='reserved' ORDER BY user_id FOR UPDATE`,[id])).rows;
     const awards=(await c.query(`SELECT user_id,place,outcome FROM maf_tournament_award_lines WHERE tournament_id=$1 ORDER BY user_id FOR UPDATE`,[id])).rows;
-    if(entries.length!==20 || awards.length!==20) throw fail(409,'Tournoi incomplet : droits non prepares.');
+    if(![10,14,15,18,19,20].includes(entries.length) || awards.length!==entries.length) throw fail(409,'Tournoi incomplet : droits non prepares.');
     const paid=new Set(entries.map(e=>Number(e.user_id)));
     if(awards.some(l=>!paid.has(Number(l.user_id)))) throw fail(409,'Resultats sans reservation valide.');
     // Verifier que les quatre rangs correspondent exactement au lot immuable
     // de l'etape 8, et non a une liste preparee independamment.
     const ordered=awards.filter(l=>l.place!==null).sort((a,b)=>Number(a.place)-Number(b.place)).map(l=>Number(l.user_id));
-    if(ordered.length!==4 || !Array.isArray(batch.final_order) || JSON.stringify(batch.final_order.map(Number))!==JSON.stringify(ordered))
+    if(ordered.length!==(entries.length===10?2:entries.length<=15?3:4) || !Array.isArray(batch.final_order) || JSON.stringify(batch.final_order.map(Number))!==JSON.stringify(ordered))
       throw fail(409,'Historique des resultats different du classement certifie.');
     const plan=buildTournamentSkinPlan(awards);
     for(const line of plan){
@@ -69,10 +69,10 @@ export async function prepareTournamentSkinEntitlements(tournamentId){
     const stored=(await c.query(`SELECT user_id,skin_kind,status FROM maf_tournament_skin_entitlements
       WHERE tournament_id=$1 ORDER BY user_id,skin_kind FOR UPDATE`,[id])).rows;
     const keys=new Set(plan.map(x=>`${x.userId}:${x.kind}`));
-    if(stored.length!==24 || stored.some(x=>!keys.has(`${Number(x.user_id)}:${x.skin_kind}`)))
+    if(stored.length!==plan.length || stored.some(x=>!keys.has(`${Number(x.user_id)}:${x.skin_kind}`)))
       throw fail(409,'Droits skins deja enregistres incoherents.');
     await c.query('COMMIT');
-    return {prepared:true,count:24,alreadyGranted:stored.filter(x=>x.status==='granted').length};
+    return {prepared:true,count:plan.length,alreadyGranted:stored.filter(x=>x.status==='granted').length};
   } catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}
   finally{c.release();}
 }

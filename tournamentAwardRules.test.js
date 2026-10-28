@@ -33,16 +33,16 @@ test('un joueur non inscrit ou une repetition est refuse',()=>{
 });
 test('classement non certifie bloque, meme quand un gagnant existe',()=>{
   const state={format:'monopoly_final_4',seats:users.slice(0,4).map(userId=>({userId})),
-    game:{phase:'over',winner:0}};
+    game:{phase:'over',winner:0,players:users.slice(0,4).map((_,i)=>({bankrupt:i!==0}))}};
   assert.throws(()=>certifiedFinalOrder(state),/non certifie/);
 });
 test('une certification contradictoire au vainqueur est refusee',()=>{
   const state={format:'monopoly_final_4',seats:users.slice(0,4).map(userId=>({userId})),
-    game:{phase:'over',winner:0},certification:{kind:'server-elimination-order-v1',source:'authoritative-game-events',order:[2,1,3,4]}};
+    game:{phase:'over',winner:0,players:users.slice(0,4).map((_,i)=>({bankrupt:i!==0}))},certification:{kind:'server-elimination-order-v1',source:'authoritative-game-events',order:[2,1,3,4]}};
   assert.throws(()=>certifiedFinalOrder(state),/ne correspond pas/);
 });
 test('un classement valide doit rester produit uniquement par un moteur serveur',()=>{
   const state={format:'monopoly_final_4',seats:users.slice(0,4).map(userId=>({userId})),
-    game:{phase:'over',winner:2},certification:{kind:'server-elimination-order-v1',source:'authoritative-game-events',order:[3,4,1,2]}};
+    game:{phase:'over',winner:2,players:users.slice(0,4).map((_,i)=>({bankrupt:i!==2}))},eliminationOrder:[2,1,4],certification:{kind:'server-elimination-order-v1',source:'authoritative-game-events',order:[3,4,1,2]}};
   assert.deepEqual(certifiedFinalOrder(state),[3,4,1,2]);
 });

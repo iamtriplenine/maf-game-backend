@@ -19,7 +19,7 @@ test('un deuxieme calcul du meme resultat est identique', () => {
   assert.deepEqual(buildTournamentSkinPlan(awards.lines),plan);
 });
 test('20 participants sans classement complet sont refuses', () => {
-  assert.throws(()=>buildTournamentSkinPlan(awards.lines.slice(0,19)),/20 participants/);
+  assert.throws(()=>buildTournamentSkinPlan(awards.lines.filter(l=>l.place!==4)),/finaliste par plateau/);
   assert.throws(()=>buildTournamentSkinPlan(awards.lines.map((l,i)=>i===4?{...l,userId:1}:l)),/en double/);
   assert.throws(()=>buildTournamentSkinPlan(awards.lines.map(l=>l.place===4?{...l,place:3}:l)),/incoherent/);
   assert.throws(()=>buildTournamentSkinPlan(awards.lines.map(l=>l.place===1?{...l,outcome:'eliminated'}:l)),/incompatible/);

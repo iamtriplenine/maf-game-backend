@@ -2,11 +2,11 @@
 // Un skin de participation par inscrit; un skin finaliste en plus pour les 4 premiers.
 export const PARTICIPATION_SKIN = 'participation';
 export const FINALIST_SKIN = 'finalist';
-export const EXPECTED_SKIN_ENTITLEMENTS = 24;
+export const EXPECTED_SKIN_ENTITLEMENTS = 24; // reference au tournoi de 20 joueurs
 
 export function buildTournamentSkinPlan(awardLines) {
-  if (!Array.isArray(awardLines) || awardLines.length !== 20) {
-    throw new Error('Les 20 participants sont requis pour preparer les skins.');
+  if (!Array.isArray(awardLines) || ![10,14,15,18,19,20].includes(awardLines.length)) {
+    throw new Error('Effectif valide de 10, 14, 15, 18, 19 ou 20 participants requis.');
   }
   const seen = new Set();
   const places = new Set();
@@ -29,14 +29,15 @@ export function buildTournamentSkinPlan(awardLines) {
     result.push({userId, kind: PARTICIPATION_SKIN, place});
     if (place !== null) result.push({userId, kind: FINALIST_SKIN, place});
   }
-  if (places.size !== 4 || result.length !== EXPECTED_SKIN_ENTITLEMENTS || seen.size !== 20) {
-    throw new Error('Le plan doit comporter 4 finalistes et 16 elimines.');
+  const finalCount=awardLines.length===10?2:awardLines.length<=15?3:4;
+  if (places.size !== finalCount || result.length !== awardLines.length+finalCount || seen.size !== awardLines.length) {
+    throw new Error('Le plan doit comporter un finaliste par plateau et tous les participants.');
   }
   return result;
 }
 
 export function resultAnimationSteps(plan) {
-  if (!Array.isArray(plan) || plan.length !== EXPECTED_SKIN_ENTITLEMENTS) {
+  if (!Array.isArray(plan) || ![12,17,18,22,23,24].includes(plan.length)) {
     throw new Error('Plan des skins incomplet.');
   }
   const ids = new Set(plan.map(x => x.userId));

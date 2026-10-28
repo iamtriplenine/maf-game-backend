@@ -1,3 +1,4 @@
+import { captureFinalCertification } from './tournamentFinalCertification.js';
 // Une finale applique les memes actions et les memes regles que le Monopoly multijoueur.
 import {rollDice,buy,build,sell,endTurn,giveUp} from './engine.js';
 const allowed = new Set(['roll','buy','build','sell','end','abandon']);
@@ -17,5 +18,5 @@ export function finalAction(state,{userId,action,square}={},rng=Math.random){
     action==='buy'?buy(state.game):action==='build'?build(state.game,square):
     action==='sell'?sell(state.game,square):action==='end'?endTurn(state.game):giveUp(state.game);
   if(game===state.game)throw new Error('Action impossible dans cette phase.');
-  return {...state,game};
+  return captureFinalCertification(state,game);
 }

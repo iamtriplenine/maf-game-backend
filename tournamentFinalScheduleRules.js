@@ -44,5 +44,5 @@ export function createFinaleMatch(finalists, makeGame) {
   const game=makeGame({names:seats.map(s=>s.name),dice:2});
   if (!game || !Array.isArray(game.players) || game.players.length!==ordered.length)
     throw new Error('Moteur finale a quatre joueurs invalide.');
-  return {format:`monopoly_final_${ordered.length}`,seats,game};
+  return {format:`monopoly_final_${ordered.length}`,seats,game,eliminationOrder:[]};
 }

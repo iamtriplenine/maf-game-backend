@@ -113,14 +113,14 @@ function output(row,now){
     tournamentId:Number(row.id),title:row.title,releaseAt,status,openedAt,
     // Ne jamais reveler de gains prepares ou des informations d'autres comptes.
     ...(credited && ['ready','opened'].includes(status)?{
-      reward:{ place:row.place===null?null:Number(row.place),realCents:Number(row.real_cents),
-        bonusCents:Number(row.bonus_cents),skinsPlanned:row.place===null?1:2,
+      reward:{ place:row.place===null?null:Number(row.place),realCents:Number(row.real_franc)*100,realFranc:Number(row.real_franc),
+        bonusCents:Number(row.bonus_franc)*100,bonusFranc:Number(row.bonus_franc),skinsPlanned:row.place===null?1:2,
         skinsDelivered:false }
     }:{}),
   };
 }
 const itemSql=`SELECT t.id,t.title,e.status AS entry_status,g.release_at,o.opened_at,
-  a.place,a.real_cents,a.bonus_cents,a.status AS award_status,b.status AS batch_status
+  a.place,a.real_cents,a.bonus_cents,a.real_franc,a.bonus_franc,a.status AS award_status,b.status AS batch_status
   FROM maf_tournament_entries e
   JOIN maf_tournaments t ON t.id=e.tournament_id
   LEFT JOIN maf_tournament_gift_schedule g ON g.tournament_id=t.id
@@ -135,7 +135,7 @@ tournamentGiftRouter.get('/gifts/mine',requireSession,wrap(async(req,res)=>{
   await maintainTournamentGiftClock();
   const {rows}=await pool.query(itemSql+' ORDER BY t.starts_at DESC LIMIT 50',[req.userId]);
   res.json({gifts:rows.map(r=>output(r,Date.now())),serverNow:Date.now(),
-    note:'Aucun montant n est attribue depuis le coffre. Les gains doivent etre certifies et credites separement.'});
+    note:'Les francs reels et bonus sont credites automatiquement apres certification. Ouvrir le coffre ne genere aucun nouveau credit.'});
 }));
 
 tournamentGiftRouter.post('/gifts/:id/open',requireSession,wrap(async(req,res)=>{
@@ -183,7 +183,7 @@ tournamentGiftRouter.put('/gifts/owner/:id/schedule',requireSession,wrap(async(r
     await c.query(`INSERT INTO maf_tournament_gift_schedule(tournament_id,release_at,original_release_at) VALUES($1,$2,$2)
       ON CONFLICT(tournament_id) DO UPDATE SET release_at=EXCLUDED.release_at,original_release_at=EXCLUDED.original_release_at,updated_at=now()`,[id,releaseAt]);
     await c.query('COMMIT');
-    res.json({tournamentId:id,releaseAt,realPayoutsEnabled:false});
+    res.json({tournamentId:id,releaseAt,realPayoutsEnabled:process.env.MAF_TOURNAMENT_PAYOUTS_ENABLED==='true'});
   }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
 }));
 

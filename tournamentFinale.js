@@ -1,3 +1,4 @@
+import { captureFinalCertification } from './tournamentFinalCertification.js';
 // Etape 7 : orchestration de la finale. Demonstration owner en lecture seule.
 // Le jeu reel exige qualification activee et presence des 2 a 4 finalistes.
 import { Router } from 'express';
@@ -271,7 +272,10 @@ export function maintainFinaleMatches(){
         const presence=expirePresence(state.game,members,now);
         const turn=tickTurnClock(presence.game,{now,autoEnd:true});
         if(presence.changed||turn.changed){
-          state.game=turn.game;
+          const certified=captureFinalCertification(state,turn.game);
+          state.game=certified.game;
+          state.eliminationOrder=certified.eliminationOrder;
+          if(certified.certification)state.certification=certified.certification;
           await c.query(`UPDATE maf_tournament_final_matches SET state=$2::jsonb,revision=revision+1
             WHERE tournament_id=$1`,[id,JSON.stringify(state)]);
           changed++;
