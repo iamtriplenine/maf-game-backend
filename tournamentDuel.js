@@ -8,6 +8,7 @@ import {requireSession} from './auth.js';
 import {ensureWallet} from './wallet.js';
 import {createGame,rollDice,buy,build,sell,endTurn,giveUp} from './engine.js';
 import {validateDuel,duelRewards,duelStartDecision,participantsAreValid,DUEL_STAKE} from './tournamentDuelRules.js';
+import {duelArchiveDecision} from './tournamentDuelArchiveRules.js';
 export const tournamentDuelRouter=Router();
 export const duelPayoutEnabled=()=>process.env.MAF_DUEL_EMERGENCY_STOP!=='true';
 export const duelEnabled=()=>duelPayoutEnabled();
@@ -156,7 +157,7 @@ tournamentDuelRouter.get('/',wrap(async(req,res)=>{
  res.json({duels:rows.map(x=>view(x,x.registered)),serverNow:Date.now()});
 }));
 tournamentDuelRouter.get('/owner',requireSession,wrap(async(req,res)=>{
- await owner(req.userId);const rows=(await pool.query(select+' WHERE d.hidden_at IS NULL ORDER BY d.created_at DESC LIMIT 50')).rows;
+ await owner(req.userId);const rows=(await pool.query(select+' WHERE d.hidden_at IS NULL ORDER BY d.created_at DESC LIMIT 200')).rows;
  res.json({duels:rows.map(x=>view(x,x.registered)),serverNow:Date.now()});
 }));
 tournamentDuelRouter.post('/owner',requireSession,wrap(async(req,res)=>{
@@ -199,19 +200,30 @@ tournamentDuelRouter.post('/owner/:id/archive',requireSession,wrap(async(req,res
   await c.query('BEGIN');
   const d=(await c.query('SELECT * FROM maf_monopoly_duels WHERE id=$1 FOR UPDATE',[id])).rows[0];
   if(!d)throw fail(404,'Duel introuvable.');
-  if(d.hidden_at){await c.query('COMMIT');return res.json({archived:true,alreadyArchived:true});}
-  if(!['draft','finished','paid','cancelled'].includes(d.status))
-   throw fail(409,'Le duel est encore actif. Annule-le avant son depart ou termine la partie.');
+  if(d.hidden_at){await c.query('COMMIT');return res.json({archived:true,alreadyArchived:true,refunded:0,refundTotal:0});}
+  // Un client a jour fournit revision; les anciens appels restent compatibles.
+  if(req.body?.revision != null && (!Number.isSafeInteger(req.body.revision) || req.body.revision !== d.revision))
+   throw fail(409,'Duel modifie depuis l ouverture de la liste. Recharge et reessaie.');
+  const awards=(await c.query('SELECT 1 FROM maf_monopoly_duel_awards WHERE duel_id=$1 LIMIT 1',[id])).rowCount;
+  const decision=duelArchiveDecision({status:d.status,hasAwards:Boolean(awards),paidAt:Boolean(d.paid_at),winnerId:d.winner_id});
+  if(!decision.allowed)throw fail(409,decision.reason);
   if(d.status==='draft'){
    const entries=(await c.query('SELECT 1 FROM maf_monopoly_duel_entries WHERE duel_id=$1 LIMIT 1',[id])).rowCount;
    if(entries)throw fail(409,'Un brouillon avec une inscription ne peut pas etre masque.');
   }
-  // Une finale terminee peut être masquée avant son versement; la maintenance
-  // parcourt encore les duels « finished » et credite a gifts_at comme auparavant.
+  let refunded=0;
+  if(decision.refund){
+   const rows=await members(c,id);
+   refunded=rows.length;
+   // Verrouillage du duel, remboursement et masquage dans une meme transaction.
+   // Un duel en cours n'a pas encore ete paye; en cas d'incoherence, blocage ci-dessus.
+   await refundLocked(c,d,rows,'owner_archived');
+  }
+  // Une finale terminee peut etre masquee avant le versement: maintenance continue a payer.
   await c.query('UPDATE maf_monopoly_duels SET hidden_at=now(),revision=revision+1 WHERE id=$1',[id]);
-  await audit(c,'duel_archived',{duelId:id,status:d.status});
+  await audit(c,'duel_archived',{duelId:id,status:d.status,refunded});
   await c.query('COMMIT');
-  res.json({archived:true,financialHistoryPreserved:true,payoutPending:d.status==='finished'});
+  res.json({archived:true,financialHistoryPreserved:true,payoutPending:d.status==='finished',refunded,refundTotal:refunded*DUEL_STAKE});
  } catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
 }));
 tournamentDuelRouter.post('/owner/:id/cancel',requireSession,wrap(async(req,res)=>{
@@ -305,7 +317,7 @@ tournamentDuelRouter.post('/:id/action',requireSession,wrap(async(req,res)=>{
 tournamentDuelRouter.get('/notices/mine',requireSession,wrap(async(req,res)=>{
  const rows=(await pool.query(`SELECT n.id,n.duel_id,n.kind,n.created_at,d.title
  FROM maf_monopoly_duel_notices n JOIN maf_monopoly_duels d ON d.id=n.duel_id
- WHERE n.user_id=$1 ORDER BY n.created_at DESC LIMIT 20`,[req.userId])).rows;
+ WHERE n.user_id=$1 AND d.hidden_at IS NULL ORDER BY n.created_at DESC LIMIT 20`,[req.userId])).rows;
  res.json({notices:rows});
 }));
 tournamentDuelRouter.get('/gifts/mine',requireSession,wrap(async(req,res)=>{
