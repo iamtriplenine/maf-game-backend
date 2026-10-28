@@ -9,6 +9,7 @@ import {ensureWallet} from './wallet.js';
 import {createGame,rollDice,buy,build,sell,endTurn,giveUp} from './engine.js';
 import {validateDuel,duelRewards,duelStartDecision,participantsAreValid,DUEL_STAKE} from './tournamentDuelRules.js';
 import {duelArchiveDecision} from './tournamentDuelArchiveRules.js';
+import { legacyGiftHiddenBefore } from './ownerGifts.js';
 export const tournamentDuelRouter=Router();
 export const duelPayoutEnabled=()=>process.env.MAF_DUEL_EMERGENCY_STOP!=='true';
 export const duelEnabled=()=>duelPayoutEnabled();
@@ -321,12 +322,13 @@ tournamentDuelRouter.get('/notices/mine',requireSession,wrap(async(req,res)=>{
  res.json({notices:rows});
 }));
 tournamentDuelRouter.get('/gifts/mine',requireSession,wrap(async(req,res)=>{
- const rows=(await pool.query(`SELECT d.id,d.title,d.status,d.gifts_at,d.paid_at,a.place,a.amount,a.credited_at,o.opened_at
+ const rows=(await pool.query(`SELECT d.id,d.title,d.created_at,d.status,d.gifts_at,d.paid_at,a.place,a.amount,a.credited_at,o.opened_at
  FROM maf_monopoly_duel_entries e JOIN maf_monopoly_duels d ON d.id=e.duel_id
  LEFT JOIN maf_monopoly_duel_awards a ON a.duel_id=e.duel_id AND a.user_id=e.user_id
  LEFT JOIN maf_monopoly_duel_openings o ON o.duel_id=e.duel_id AND o.user_id=e.user_id
  WHERE e.user_id=$1 AND e.status='reserved' ORDER BY d.starts_at DESC LIMIT 30`,[req.userId])).rows;
- res.json({gifts:rows.map(r=>({duelId:Number(r.id),title:r.title,releaseAt:r.gifts_at,
+ const cutoff=await legacyGiftHiddenBefore();
+ res.json({gifts:rows.filter(r=>new Date(r.created_at).getTime()>=cutoff).map(r=>({duelId:Number(r.id),title:r.title,releaseAt:r.gifts_at,
   status:r.opened_at?'opened':r.credited_at?'ready':r.status==='cancelled'?'cancelled':'waiting',
   place:r.place,amount:r.credited_at?r.amount:null,openedAt:r.opened_at,skinsPlanned:2}))});
 }));

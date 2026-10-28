@@ -9,6 +9,7 @@ import { ownerDemoGift, rewardAvailability, validateReleaseAt } from './tourname
 import { postponedGiftAt } from './tournamentLiveRules.js';
 import { studioSkin } from './studioSkinCatalog.js';
 import { ensureTournamentSkinTables } from './tournamentSkins.js';
+import { legacyGiftHiddenBefore } from './ownerGifts.js';
 
 export const tournamentGiftRouter = Router();
 const problem=(status,message)=>Object.assign(new Error(message),{status});
@@ -116,7 +117,7 @@ function output(row,now){
   if(row.participant_skin_id)chosen.push({id:row.participant_skin_id,name:studioSkin(row.participant_skin_id)?.name||row.participant_skin_id,unlocked:!!row.participant_skin_unlocked});
   if(row.place===1 && row.winner_skin_id)chosen.push({id:row.winner_skin_id,name:studioSkin(row.winner_skin_id)?.name||row.winner_skin_id,unlocked:!!row.winner_skin_unlocked});
   return {
-    tournamentId:Number(row.id),title:row.title,releaseAt,status,openedAt,
+    tournamentId:Number(row.id),title:row.title,createdAt:row.created_at,releaseAt,status,openedAt,
     // Ne jamais reveler de gains prepares ou des informations d'autres comptes.
     ...(credited && ['ready','opened'].includes(status)?{
       reward:{ place:row.place===null?null:Number(row.place),realCents:Number(row.real_franc)*100,realFranc:Number(row.real_franc),
@@ -125,7 +126,7 @@ function output(row,now){
     }:{}),
   };
 }
-const itemSql=`SELECT t.id,t.title,e.status AS entry_status,g.release_at,o.opened_at,
+const itemSql=`SELECT t.id,t.title,t.created_at,e.status AS entry_status,g.release_at,o.opened_at,
   t.participant_skin_id,t.winner_skin_id,
   pu.skin_id AS participant_skin_unlocked,wu.skin_id AS winner_skin_unlocked,
   a.place,a.real_cents,a.bonus_cents,a.real_franc,a.bonus_franc,a.status AS award_status,b.status AS batch_status
@@ -144,7 +145,8 @@ tournamentGiftRouter.get('/gifts/mine',requireSession,wrap(async(req,res)=>{
   await ensureTournamentGifts();
   await maintainTournamentGiftClock();
   const {rows}=await pool.query(itemSql+' ORDER BY t.starts_at DESC LIMIT 50',[req.userId]);
-  res.json({gifts:rows.map(r=>output(r,Date.now())),serverNow:Date.now(),
+  const cutoff=await legacyGiftHiddenBefore();
+  res.json({gifts:rows.filter(r=>new Date(r.created_at).getTime()>=cutoff).map(r=>output(r,Date.now())),serverNow:Date.now(),
     note:'Les francs reels et bonus sont credites automatiquement apres certification. Ouvrir le coffre ne genere aucun nouveau credit.'});
 }));
 

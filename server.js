@@ -11,6 +11,7 @@ import { tournamentAwardsRouter, maintainTournamentAwardCredits } from "./tourna
 import { tournamentSkinsRouter } from "./tournamentSkins.js";
 import { tournamentCancellationRouter, maintainTournamentCancellations } from "./tournamentCancellation.js";
 import { pool } from "./db.js";
+import { ownerGiftsRouter } from "./ownerGifts.js";
 import { authRouter } from "./auth.js";
 import { chatRouter } from "./chat.js";
 import { roomsRouter, maintainRooms } from "./rooms.js";
@@ -70,6 +71,7 @@ app.use("/api/tournaments", tournamentSkinsRouter);
 app.use("/api/tournaments/duels", tournamentDuelRouter);
 app.use("/api/tournaments", tournamentsRouter);
 app.use("/api/tournaments", tournamentGiftRouter);
+app.use("/api/gifts", ownerGiftsRouter);
 app.use("/api/history", historyRouter);
 app.use("/api/owner", ownerNotificationsRouter);
 app.use((error, _req, res, _next) => {
