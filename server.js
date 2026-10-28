@@ -19,6 +19,8 @@ import { monopolyVoicesRouter, ensureMonopolyVoices } from "./monopolyVoices.js"
 import { historyRouter } from "./history.js";
 import { ownerNotificationsRouter } from "./ownerNotifications.js"; // MAF_OWNER_ALERTS_V1
 
+import {tournamentDuelRouter,maintainTournamentDuels} from './tournamentDuel.js';
+
 const app = express();
 // Derriere Render : l'adresse du visiteur vient du proxy (non falsifiable), pas d'un en-tete envoye par le client.
 app.set("trust proxy", 1);
@@ -65,6 +67,7 @@ app.use("/api/tournaments", tournamentFinalistsRouter);
 app.use("/api/tournaments", tournamentFinaleRouter);
 app.use("/api/tournaments", tournamentAwardsRouter);
 app.use("/api/tournaments", tournamentSkinsRouter);
+app.use("/api/tournaments/duels", tournamentDuelRouter);
 app.use("/api/tournaments", tournamentsRouter);
 app.use("/api/tournaments", tournamentGiftRouter);
 app.use("/api/history", historyRouter);
@@ -106,3 +109,7 @@ void maintainFinalistArrivals().catch(e => console.error('tournament finalists s
 // Etape 7 : maintenance serveur, aucun depart reel par defaut.
 setInterval(() => { void maintainFinaleStarts().catch(e => console.error('finale maintenance:',e.message)); },30000).unref();
 void maintainFinaleStarts().catch(e => console.error('finale setup:',e.message));
+
+// Duel programme: rattrapage apres reveil, redemarrage et indisponibilite temporaire.
+setInterval(() => { void maintainTournamentDuels().catch(e => console.error("duel maintenance:",e.message)); },30000).unref();
+void maintainTournamentDuels().catch(e => console.error("duel initialisation:",e.message));
