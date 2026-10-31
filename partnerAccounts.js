@@ -1,3 +1,4 @@
+import { partnerInvitation, revokePartnerInvites } from './referrals.js';
 import { Router } from 'express';
 import { pool } from './db.js';
 import { ensureWallet } from './wallet.js';
@@ -79,6 +80,7 @@ partnerAccountsRouter.patch('/owner/partners/:id',run(async(req,res)=>{
     if(row.account_role!==change.expectedRole)throw fail(409,'Le statut a change dans une autre fenetre. Actualise la liste.');
     const previous=row.account_role,changed=previous!==change.desiredRole;
     if(changed)await c.query('UPDATE maf_users SET account_role=$2 WHERE id=$1',[userId,change.desiredRole]);
+    if(change.desiredRole==='player')await revokePartnerInvites(c,userId);
     await c.query(`INSERT INTO maf_partner_role_events(request_key,owner_id,user_id,expected_role,previous_role,new_role,changed)
       VALUES($1,$2,$3,$4,$5,$6,$7)`,[change.requestKey,req.userId,userId,change.expectedRole,previous,change.desiredRole,changed]);
     row.account_role=change.desiredRole;
@@ -92,7 +94,6 @@ partnerAccountsRouter.get('/partner/commissions',run(async(req,res)=>{
   const row=(await pool.query('SELECT id,client_id,pseudo,account_role,bonus_balance FROM maf_users WHERE id=$1',[req.userId])).rows[0];
   if(!row)throw fail(401,'Compte introuvable.');
   if(accountRole(row)!=='partner')throw fail(403,'Acces reserve aux partenaires actifs.');
-  // Invitations and the deposit commission ledger are activated in later steps.
-  // Do not mislabel the user's existing game bonuses as referral earnings.
-  res.json({account:view(row),referrals_enabled:false,today:0,last_7_days:0,total:0,bonus_balance:Number(row.bonus_balance||0),daily:[]});
+  const invitation=await partnerInvitation(pool,req.userId);
+  res.json({account:view(row),referrals_enabled:true,commissions_enabled:false,invitation,today:0,last_7_days:0,total:0,bonus_balance:Number(row.bonus_balance||0),daily:[]});
 }));

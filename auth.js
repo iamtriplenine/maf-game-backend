@@ -1,3 +1,5 @@
+import { ensureReferralTables, registerWithReferral } from './referrals.js';
+import { registrationReferral } from './referralProof.js';
 import { ensureAccountRoles, accountRole, privilegedRegistration } from './accountRoles.js';
 // Comptes MAF : pseudo + code a 10 chiffres (pas de mot de passe).
 // Routes : POST /api/register, POST /api/login, GET /api/me
@@ -47,6 +49,7 @@ export function ensureTable() {
       ))
       .then(() => ensureClientIds(pool))
       .then(() => ensureAccountRoles(pool))
+      .then(() => ensureReferralTables(pool))
       .then(() => ensureProfileBackgroundAccess())
       .catch((error) => {
         tableReady = null;
@@ -141,7 +144,7 @@ authRouter.use((_req, res, next) => {
   );
 });
 
-authRouter.post("/register", async (req, res) => {
+authRouter.post(["/register", "/register-referred"], async (req, res) => {
   if (privilegedRegistration(req.body)) return fail(res, 400, "Les droits du compte sont geres par le proprietaire.");
   const input = checkInput(req.body);
   if (input.error) return fail(res, 400, input.error);
@@ -149,14 +152,13 @@ authRouter.post("/register", async (req, res) => {
   try {
     const salt = crypto.randomBytes(16).toString("hex");
     const hash = await hashCode(input.code, salt);
-    const result = await pool.query(
-      `insert into maf_users (pseudo, pseudo_key, code_salt, code_hash)
-       values ($1, $2, $3, $4) returning *`,
-      [input.pseudo, input.pseudoKey, salt, hash]
-    );
-    const user = publicUser(result.rows[0]);
+    const referralProof = registrationReferral(req.body);
+    if (req.path === '/register-referred' && referralProof === undefined) return fail(res,400,'Utilise un lien de parrainage valide.');
+    const row = await registerWithReferral(pool,input,salt,hash,referralProof);
+    const user = publicUser(row);
     res.status(201).json({ token: makeToken(user.id), user });
   } catch (error) {
+    if (error.status) return fail(res,error.status,error.message);
     if (error.code === "23505") return fail(res, 409, "Ce pseudo est deja pris, choisis-en un autre.");
     console.error("register :", error.message);
     fail(res, 500, "Erreur serveur, reessaie.");

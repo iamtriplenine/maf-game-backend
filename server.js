@@ -1,3 +1,4 @@
+import { referralRouter } from './referralRoutes.js';
 import { partnerAccountsRouter } from './partnerAccounts.js';
 import express from "express";
 import cors from "cors";
@@ -53,6 +54,7 @@ app.get("/health", async (_req, res) => {
   }
 });
 
+app.use("/api", referralRouter);
 app.use("/api", authRouter); // /api/register, /api/login, /api/me
 
 app.use("/api", chatRouter); // /api/chat
