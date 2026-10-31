@@ -1,3 +1,4 @@
+import { partnerAccountsRouter } from './partnerAccounts.js';
 import express from "express";
 import cors from "cors";
 import { walletRouter } from "./wallet.js";
@@ -73,6 +74,7 @@ app.use("/api/tournaments", tournamentsRouter);
 app.use("/api/tournaments", tournamentGiftRouter);
 app.use("/api/gifts", ownerGiftsRouter);
 app.use("/api/history", historyRouter);
+app.use("/api", partnerAccountsRouter);
 app.use("/api/owner", ownerNotificationsRouter);
 app.use((error, _req, res, _next) => {
   if (error.type === "entity.too.large") return res.status(413).json({ error: "Capture trop volumineuse (2 Mo maximum)." });
