@@ -2,6 +2,7 @@ import { isOwnerAccount, ownerAccountId } from './accountRoles.js';
 import crypto from 'node:crypto';
 import { feeFor } from './walletFees.js';
 import { withdrawalFees } from './ownerFees.js';
+import { refundPendingBonusWithdrawalFees, normalizeBonusWithdrawalFees } from './bonusWithdrawalFees.js';
 import { createTestAdminAccess, adminActor } from './adminAccess.js';
 import { redeemWinPractice } from './winPractice.js';
 import { Router } from 'express';
@@ -79,6 +80,7 @@ export function ensureWallet() {
           details jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
         );
       `);
+      await refundPendingBonusWithdrawalFees(c);
       await c.query('COMMIT');
     } catch (e) { await c.query('ROLLBACK'); throw e; } finally { c.release(); }
   })().catch(e => { ready = null; throw e; });
@@ -215,13 +217,13 @@ walletRouter.get('/wallet/withdrawal-info', route(async (req,res) => {
 }));
 for (const kind of ['deposit','withdrawal']) {
   walletRouter.post(`/wallet/${kind}s`, route(async (req,res) => {
-    const value = amount(req.body.amount),
-      breakdown = kind === 'withdrawal' ? withdrawalFees(value) : { fee_amount:feeFor(value),owner_fee_amount:0 },
-      transactionFee = breakdown.fee_amount, ownerFee = breakdown.owner_fee_amount,
-      debit = value + transactionFee + ownerFee, requestKey = key(req.body.request_key);
     const currency = req.body.currency ?? 'F';
     if (!['F','V'].includes(currency) || kind === 'deposit' && currency !== 'F')
       throw fail(400,'Choisis le solde argent (F) ou bonus (V).');
+    const value = amount(req.body.amount),
+      breakdown = kind === 'withdrawal' ? withdrawalFees(value,currency) : { fee_amount:feeFor(value),owner_fee_amount:0 },
+      transactionFee = breakdown.fee_amount, ownerFee = breakdown.owner_fee_amount,
+      debit = value + transactionFee + ownerFee, requestKey = key(req.body.request_key);
     const result = await tx(async c => {
       const u = await user(c,req.userId);
       const prior = (await c.query('SELECT * FROM maf_transactions WHERE user_id=$1 AND request_key=$2',[u.id,requestKey])).rows[0];
@@ -239,7 +241,7 @@ for (const kind of ['deposit','withdrawal']) {
         const ownerAccount = await c.query('SELECT id FROM maf_users WHERE id=$1',[await ownerAccountId(c)]);
         if (!ownerAccount.rowCount) throw fail(503,'Compte de commission indisponible. Reessaie plus tard.');
         const column = currency === 'V' ? 'bonus_balance' : 'balance';
-        if (u[column] < debit) throw fail(409,currency === 'V' ? 'Solde bonus insuffisant (retrait + frais de 19 %).' : 'Solde argent insuffisant (retrait + frais de 19 %).');
+        if (u[column] < debit) throw fail(409,currency === 'V' ? 'Solde bonus insuffisant (retrait + frais de service de 1 %).' : 'Solde argent insuffisant (retrait + frais de 19 %).');
         updated = (await c.query(`UPDATE maf_users SET ${column}=${column}-$2 WHERE id=$1 RETURNING *`,[u.id,debit])).rows[0];
       }
       const row = (await c.query(`INSERT INTO maf_transactions(id,user_id,kind,amount,phone,status,request_key,currency,fee_amount,owner_fee_amount)
@@ -354,6 +356,7 @@ for (const kind of ['deposit','withdrawal']) for (const decision of ['approve','
       }
       if (['approved','rejected'].includes(t.status)) throw fail(409,'Demande deja traitee.');
       if (decision === 'approve' && t.status !== 'pending') throw fail(409,'Attendre la capture du paiement avant confirmation.');
+      await normalizeBonusWithdrawalFees(c,t,u,req.adminActor);
       if (kind === 'deposit' && decision === 'approve' || kind === 'withdrawal' && decision === 'reject') {
         const column = kind === 'withdrawal' && t.currency === 'V' ? 'bonus_balance' : 'balance';
         // Depot approuve : crediter le montant net. Retrait refuse : restituer AUSSI les frais.
