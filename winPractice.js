@@ -1,3 +1,4 @@
+import { isOwnerAccount } from './accountRoles.js';
 // Codes Win temporaires : assignation a un compte, a un jeu et a une partie eventuelle.
 // Les regles des salons, les debits et les versements ne sont pas modifies.
 import crypto from 'node:crypto';
@@ -59,8 +60,7 @@ function view(row) {
       (row.kind !== 'match' || row.matches_left > 0 || row.match_room_id != null)};
 }
 async function requireOwner(req) {
-  const { rows } = await pool.query('SELECT pseudo_key FROM maf_users WHERE id=$1',[req.userId]);
-  if (rows[0]?.pseudo_key !== '999') throw fail(403,'Acces reserve au proprietaire.');
+  if (!await isOwnerAccount(req.userId, pool)) throw fail(403,'Acces reserve au proprietaire.');
 }
 winPracticeRouter.use(requireSession);
 winPracticeRouter.use((req,res,next) => ensureWinPractice().then(() => next(), next));

@@ -1,3 +1,4 @@
+import { isOwnerAccount } from './accountRoles.js';
 // Cadeaux hors tournois, decidés exclusivement par le propriétaire 999.
 // Les crédits sont appliqués une seule fois lors de l'ouverture, dans une transaction.
 import crypto from 'node:crypto';
@@ -14,8 +15,7 @@ const fail=(status,message)=>Object.assign(new Error(message),{status});
 const wrap=fn=>async(req,res,next)=>{try{await fn(req,res);}catch(e){if(e.status)return res.status(e.status).json({error:e.message});next(e);}};
 const idOf=value=>{const n=Number(value);if(!Number.isSafeInteger(n)||n<1)throw fail(400,'Identifiant invalide.');return n;};
 async function requireOwner(userId,c=pool){
-  const r=(await c.query('SELECT pseudo_key FROM maf_users WHERE id=$1',[userId])).rows[0];
-  if(r?.pseudo_key!=='999')throw fail(403,'Réservé au propriétaire 999.');
+  if (!await isOwnerAccount(userId, c))throw fail(403,'Réservé au propriétaire 999.');
 }
 let ready;
 export function ensureOwnerGifts(){

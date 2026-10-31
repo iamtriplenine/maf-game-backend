@@ -1,3 +1,4 @@
+import { isOwnerAccount, ownerAccountId } from './accountRoles.js';
 import crypto from 'node:crypto';
 import { feeFor } from './walletFees.js';
 import { withdrawalFees } from './ownerFees.js';
@@ -157,8 +158,8 @@ walletRouter.use('/admin', (req, res, next) => {
   const header = String(req.headers.authorization || '');
   const session = readToken(header.startsWith('Bearer ') ? header.slice(7) : '');
   if (!session || !Number.isSafeInteger(session.uid)) return res.status(403).json({error:'Acces administrateur refuse.'});
-  pool.query('SELECT pseudo_key FROM maf_users WHERE id=$1',[session.uid]).then(({rows}) => {
-    if (rows[0]?.pseudo_key !== '999') return res.status(403).json({error:'Acces administrateur refuse.'});
+  isOwnerAccount(session.uid, pool).then(allowed => {
+    if (!allowed) return res.status(403).json({error:'Acces administrateur refuse.'});
     req.adminActor = 'admin:owner:' + session.uid;
     next();
   }).catch(next);
@@ -171,7 +172,7 @@ walletRouter.get('/wallet', route(async (req,res) => {
 // Uniquement au vrai compte 999 connecte, pas aux autres joueurs ni au code admin de test.
 walletRouter.get('/wallet/owner-commissions', route(async (req,res) => {
   const owner = (await pool.query('SELECT id,pseudo_key,bonus_balance FROM maf_users WHERE id=$1',[req.userId])).rows[0];
-  if (!owner || owner.pseudo_key !== '999') throw fail(403,'Reservé au compte proprietaire.');
+  if (!owner || !await isOwnerAccount(owner.id, pool)) throw fail(403,'Reservé au compte proprietaire.');
   const { rows: [s] } = await pool.query(`
     SELECT coalesce(sum(amount),0)::bigint AS total,
       coalesce(sum(amount) FILTER (WHERE (created_at AT TIME ZONE 'Africa/Abidjan')::date = (now() AT TIME ZONE 'Africa/Abidjan')::date),0)::bigint AS today,
@@ -235,7 +236,7 @@ for (const kind of ['deposit','withdrawal']) {
         const deposited = await c.query("SELECT 1 FROM maf_transactions WHERE user_id=$1 AND kind='deposit' AND status='approved' LIMIT 1",[u.id]);
         if (!deposited.rowCount) throw fail(409,'Effectue un premier depot confirme avant de retirer.');
         // Le compte 999 doit exister AVANT de debiter un joueur.
-        const ownerAccount = await c.query('SELECT id FROM maf_users WHERE pseudo_key=$1',['999']);
+        const ownerAccount = await c.query('SELECT id FROM maf_users WHERE id=$1',[await ownerAccountId(c)]);
         if (!ownerAccount.rowCount) throw fail(503,'Compte de commission indisponible. Reessaie plus tard.');
         const column = currency === 'V' ? 'bonus_balance' : 'balance';
         if (u[column] < debit) throw fail(409,currency === 'V' ? 'Solde bonus insuffisant (retrait + frais de 19 %).' : 'Solde argent insuffisant (retrait + frais de 19 %).');
@@ -363,7 +364,7 @@ for (const kind of ['deposit','withdrawal']) for (const decision of ['approve','
       // Crediter les 18 % UNE SEULE FOIS, au moment de la validation du retrait,
       // dans la MEME transaction SQL que la validation. Aucun credit si refus.
       if (kind === 'withdrawal' && decision === 'approve' && Number(t.owner_fee_amount || 0) > 0) {
-        const owner = (await c.query('SELECT id,bonus_balance FROM maf_users WHERE pseudo_key=$1 FOR UPDATE',['999'])).rows[0];
+        const owner = (await c.query('SELECT id,bonus_balance FROM maf_users WHERE id=$1 FOR UPDATE',[await ownerAccountId(c)])).rows[0];
         if (!owner) throw fail(503,'Compte proprietaire introuvable : validation suspendue.');
         const commission = Number(t.owner_fee_amount);
         const recorded = await c.query(`INSERT INTO maf_owner_commissions(transaction_id,owner_id,player_id,amount,currency)

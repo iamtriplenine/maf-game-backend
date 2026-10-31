@@ -1,3 +1,4 @@
+import { isOwnerAccount, ownerAccountId } from './accountRoles.js';
 import { realTournamentFeaturesEnabled } from './tournamentLaunchPolicy.js';
 // MAF Monopoly - credits reels transactionnels apres classement certifie.
 // Aucun client / proprietaire ne peut transmettre un classement ou payer manuellement.
@@ -23,8 +24,7 @@ const handle = fn => async (req,res,next) => {try { await fn(req,res); } catch(e
 }};
 const integerId = value => { const v=Number(value);if(!Number.isSafeInteger(v)||v<=0)throw fail(400,'Tournoi invalide.');return v; };
 async function owner(req) {
-  const {rows}=await pool.query('SELECT pseudo_key FROM maf_users WHERE id=$1',[req.userId]);
-  if(rows[0]?.pseudo_key!=='999')throw fail(403,'Reserve au proprietaire 999.');
+  if (!await isOwnerAccount(req.userId, pool))throw fail(403,'Reserve au proprietaire 999.');
 }
 let installed;
 export function ensureTournamentAwardTables() {
@@ -143,7 +143,7 @@ export async function settleCertifiedTournamentAwards(tournamentId) {
        Number(batch.total_real_franc)!==plan.totalRealFranc ||
        Number(batch.total_bonus_franc)!==plan.totalBonusFranc))
       throw fail(409,'Ancien lot de gains incompatible : paiement bloque.');
-    const ownerUser=(await c.query("SELECT id FROM maf_users WHERE pseudo_key='999' FOR UPDATE")).rows;
+    const ownerUser=(await c.query("SELECT id FROM maf_users WHERE id=$1 FOR UPDATE",[await ownerAccountId(c)])).rows;
     if(ownerUser.length!==1)throw fail(409,'Compte organisateur 999 introuvable ou ambigu.');
     if(!batch)await c.query(`INSERT INTO maf_tournament_award_batches
       (tournament_id,final_order,organizer_franc,total_real_franc,total_bonus_franc)

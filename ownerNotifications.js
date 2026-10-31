@@ -1,3 +1,4 @@
+import { isOwnerAccount } from './accountRoles.js';
 import { Router } from 'express';
 import { pool } from './db.js';
 import { ensureWallet } from './wallet.js';
@@ -32,8 +33,7 @@ ownerNotificationsRouter.use(async (req,res,next) => {
   const data=readToken(bearer.startsWith('Bearer ') ? bearer.slice(7) : '');
   if (!data || !Number.isSafeInteger(data.uid)) return res.status(401).json({error:'Session expiree.'});
   req.userId=data.uid;
-  const {rows} = await pool.query('SELECT pseudo_key FROM maf_users WHERE id=$1',[req.userId]);
-  if (rows[0]?.pseudo_key !== '999') return res.status(403).json({error:'Acces prive refuse.'});
+  if (!await isOwnerAccount(req.userId, pool)) return res.status(403).json({error:'Acces prive refuse.'});
   await ensureReceipts();
   req.ownerId = req.userId;
   next();

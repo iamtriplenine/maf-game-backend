@@ -1,3 +1,4 @@
+import { ensureAccountRoles, accountRole, privilegedRegistration } from './accountRoles.js';
 // Comptes MAF : pseudo + code a 10 chiffres (pas de mot de passe).
 // Routes : POST /api/register, POST /api/login, GET /api/me
 import { studioSkin } from './studioSkinCatalog.js';
@@ -45,6 +46,7 @@ export function ensureTable() {
         "alter table maf_users add column if not exists profile_background_id text not null default 'classic'"
       ))
       .then(() => ensureClientIds(pool))
+      .then(() => ensureAccountRoles(pool))
       .then(() => ensureProfileBackgroundAccess())
       .catch((error) => {
         tableReady = null;
@@ -106,6 +108,7 @@ function addFailure(key) {
 
 export const publicUser = (row) => ({
   id: row.id, client_id: row.client_id, pseudo: row.pseudo, balance: row.balance,
+  account_role: accountRole(row),
   skin_id: row.skin_id || "loki",
   profile_background_id: publicProfileBackground(row.profile_background_id),
   bonus_balance: row.bonus_balance || 0, phone: row.phone || null,
@@ -139,8 +142,10 @@ authRouter.use((_req, res, next) => {
 });
 
 authRouter.post("/register", async (req, res) => {
+  if (privilegedRegistration(req.body)) return fail(res, 400, "Les droits du compte sont geres par le proprietaire.");
   const input = checkInput(req.body);
   if (input.error) return fail(res, 400, input.error);
+  if (input.pseudoKey === "999") return fail(res, 409, "Ce pseudo est reserve au proprietaire.");
   try {
     const salt = crypto.randomBytes(16).toString("hex");
     const hash = await hashCode(input.code, salt);

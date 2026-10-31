@@ -1,3 +1,4 @@
+import { isOwnerAccount } from './accountRoles.js';
 import { realTournamentFeaturesEnabled } from './tournamentLaunchPolicy.js';
 // Espace Recompenses MAF : heure de remise, coffre visuel et consultation personnelle.
 // Ce routeur ne modifie JAMAIS les soldes, les bonus, les skins ou les resultats.
@@ -25,8 +26,7 @@ const positiveId=value=>{
   return n;
 };
 async function ensureOwner(userId){
-  const r=await pool.query('SELECT pseudo_key FROM maf_users WHERE id=$1',[userId]);
-  if(r.rows[0]?.pseudo_key!=='999')throw problem(403,'Accès réservé au propriétaire.');
+  if (!await isOwnerAccount(userId, pool))throw problem(403,'Accès réservé au propriétaire.');
 }
 let ready;
 export function ensureTournamentGifts(){

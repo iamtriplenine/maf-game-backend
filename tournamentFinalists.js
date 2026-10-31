@@ -1,3 +1,4 @@
+import { isOwnerAccount } from './accountRoles.js';
 import { realTournamentFeaturesEnabled } from './tournamentLaunchPolicy.js';
 // Routes lecture seule / demonstration reservees au proprietaire 999.
 import { Router } from 'express';
@@ -12,8 +13,7 @@ const fail=(status,message)=>Object.assign(new Error(message),{status});
 const handle=fn=>async(req,res,next)=>{try{await fn(req,res);}catch(e){if(e.status)return res.status(e.status).json({error:e.message});next(e);}};
 const validId=value=>{const n=Number(value);if(!Number.isSafeInteger(n)||n<1)throw fail(400,'Identifiant de tournoi invalide.');return n;};
 async function checkOwner(req){
-  const {rows}=await pool.query('SELECT pseudo_key FROM maf_users WHERE id=$1',[req.userId]);
-  if(rows[0]?.pseudo_key!=='999')throw fail(403,'Reserve au compte proprietaire 999.');
+  if (!await isOwnerAccount(req.userId, pool))throw fail(403,'Reserve au compte proprietaire 999.');
 }
 async function ensureFinalsReady(){await ensureQualificationTables();await ensureFinalistsTables();}
 let pending;

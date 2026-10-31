@@ -1,3 +1,4 @@
+import { isOwnerAccount } from './accountRoles.js';
 // Tournoi officiel a deux comptes - isolement des tournois classiques.
 // Duels et versements actives; MAF_DUEL_EMERGENCY_STOP=true permet un arret urgent.
 // Aucune action navigateur n'autorise directement une attribution de solde.
@@ -60,8 +61,7 @@ export function ensureTournamentDuels(){
  return ready;
 }
 async function owner(userId){
- const x=(await pool.query('SELECT pseudo_key FROM maf_users WHERE id=$1',[userId])).rows[0];
- if(x?.pseudo_key!=='999')throw fail(403,'Compte 999 requis.');
+ if (!await isOwnerAccount(userId, pool))throw fail(403,'Compte 999 requis.');
 }
 async function members(c,id){return (await c.query(`SELECT e.user_id,u.pseudo FROM maf_monopoly_duel_entries e
  JOIN maf_users u ON u.id=e.user_id WHERE e.duel_id=$1 AND e.status='reserved'

@@ -1,3 +1,4 @@
+import { isOwnerAccount } from './accountRoles.js';
 // Annulation administrateur et tournoi incomplet, etape 3.
 // La suppression visible est une suppression logique pour garder l'historique financier.
 import { Router } from 'express';
@@ -57,8 +58,7 @@ export function ensureTournamentCancellation() {
 }
 
 async function owner(req) {
-  const { rows } = await pool.query('SELECT pseudo_key FROM maf_users WHERE id=$1', [req.userId]);
-  if (rows[0]?.pseudo_key !== '999') throw fail(403, 'Acces reserve au proprietaire.');
+  if (!await isOwnerAccount(req.userId, pool)) throw fail(403, 'Acces reserve au proprietaire.');
 }
 
 /**

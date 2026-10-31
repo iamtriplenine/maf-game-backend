@@ -1,3 +1,4 @@
+import { isOwnerAccount } from './accountRoles.js';
 import { realTournamentFeaturesEnabled } from './tournamentLaunchPolicy.js';
 // Tirage persistant, remboursement du surplus et creation atomique de 2 a 4 plateaux.
 // IMPORTANT : le lancement REEL est volontairement desactive tant que le
@@ -27,8 +28,7 @@ const numericId = value => {const n=Number(value);if(!Number.isSafeInteger(n)||n
 // Ne jamais exposer l'ordre des cartes restants (decks), ni les identifiants internes des adversaires.
 const playerView = privateMatchView;
 async function checkOwner(req) {
-  const result=await pool.query('SELECT pseudo_key FROM maf_users WHERE id=$1',[req.userId]);
-  if(result.rows[0]?.pseudo_key!=='999') throw fail(403,'Reserve au compte proprietaire 999.');
+  if (!await isOwnerAccount(req.userId, pool)) throw fail(403,'Reserve au compte proprietaire 999.');
 }
 let installed;
 export function ensureQualificationTables(){

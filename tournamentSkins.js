@@ -1,3 +1,4 @@
+import { isOwnerAccount } from './accountRoles.js';
 // Etape 9 : registre preparatoire et demonstration proprietaire.
 // Ne modifie ni inventaire de skins joueurs ni solde : assets et schema inventaire a valider.
 import { Router } from 'express';
@@ -13,8 +14,7 @@ const fail=(status,message)=>Object.assign(new Error(message),{status});
 const handler=fn=>async(req,res,next)=>{try{await fn(req,res);}catch(e){if(e.status)return res.status(e.status).json({error:e.message});next(e);}};
 const positiveId=x=>{const n=Number(x);if(!Number.isSafeInteger(n)||n<1)throw fail(400,'Identifiant de tournoi invalide.');return n;};
 async function owner(req){
-  const {rows}=await pool.query('SELECT pseudo_key FROM maf_users WHERE id=$1',[req.userId]);
-  if(rows[0]?.pseudo_key!=='999')throw fail(403,'Reserve au proprietaire 999.');
+  if (!await isOwnerAccount(req.userId, pool))throw fail(403,'Reserve au proprietaire 999.');
 }
 let schemaReady;
 export function ensureTournamentSkinTables(){

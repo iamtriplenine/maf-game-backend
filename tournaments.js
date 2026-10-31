@@ -1,3 +1,4 @@
+import { isOwnerAccount } from './accountRoles.js';
 // Etape 1 : annonces uniquement. Aucune route de reservation ou de mouvement de solde.
 import { Router } from 'express';
 import { PUBLIC_REWARD_SCENARIOS } from './tournamentPublicRewards.js';
@@ -98,8 +99,7 @@ function input(body) {
     participantSkinId, winnerSkinId];
 }
 async function owner(req) {
-  const { rows } = await pool.query('SELECT pseudo_key FROM maf_users WHERE id=$1', [req.userId]);
-  if (rows[0]?.pseudo_key !== '999') throw fail(403, 'Accès réservé au propriétaire.');
+  if (!await isOwnerAccount(req.userId, pool)) throw fail(403, 'Accès réservé au propriétaire.');
 }
 tournamentsRouter.use((req,res,next) => { res.set('Cache-Control','no-store'); next(); });
 // Initialisation paresseuse : l'indisponibilite des tournois ne bloque pas les autres jeux.
