@@ -205,12 +205,17 @@ authRouter.get("/me", async (req, res) => {
   }
 });
 
-export function requireSession(req, res, next) {
+export async function requireSession(req, res, next) {
   const auth = String(req.headers.authorization || "");
   const data = readToken(auth.startsWith("Bearer ") ? auth.slice(7) : "");
   if (!data || !Number.isSafeInteger(data.uid)) return res.status(401).json({ error: "Session expiree." });
-  req.userId = data.uid;
-  next();
+  if (!pool) return res.status(503).json({ error: "Base de donnees non configuree." });
+  try {
+    const user = await pool.query('SELECT id FROM maf_users WHERE id=$1', [data.uid]);
+    if (!user.rows[0]) return res.status(401).json({ error: "Compte introuvable ou supprime." });
+    req.userId = data.uid;
+    next();
+  } catch (error) { next(error); }
 }
 
 // Fonds Studio 3D : Matrix accessible a tous, preference du compte.

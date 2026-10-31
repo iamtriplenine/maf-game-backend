@@ -1,3 +1,4 @@
+import { deleteEmptyAccount } from './deleteEmptyAccount.js';
 import { ensureReferralCommissions, creditReferralDeposit } from './referralCommissions.js';
 import { isOwnerAccount, ownerAccountId } from './accountRoles.js';
 import crypto from 'node:crypto';
@@ -157,7 +158,7 @@ walletRouter.use('/wallet', requireSession);
 walletRouter.use('/admin', (req, res, next) => {
   res.set('Cache-Control','no-store');
   req.adminActor = adminActor(req);
-  if (req.adminActor) return next();
+  if (req.adminActor) return req.adminActor.startsWith('admin:test-user:') ? requireSession(req, res, next) : next();
   // Acces direct reserve au compte proprietaire authentifie.
   const header = String(req.headers.authorization || '');
   const session = readToken(header.startsWith('Bearer ') ? header.slice(7) : '');
@@ -497,16 +498,32 @@ walletRouter.patch('/admin/coupons/:code', route(async (req,res) => {
 
 // Donnees publiques du compte uniquement : jamais de code de connexion ni de hash.
 walletRouter.get('/admin/users', route(async (req,res) => {
+  const header = String(req.headers.authorization || '');
+  const session = readToken(header.startsWith('Bearer ') ? header.slice(7) : '');
+  const ownerId = await ownerAccountId(pool);
+  const canDelete = session?.uid === ownerId;
   const q = typeof req.query.q === 'string' ? req.query.q.trim().slice(0,80) : '';
   const limit = Math.floor(Math.min(100,Math.max(1,Number(req.query.limit)||25)));
   const offset = Math.floor(Math.max(0,Number(req.query.offset)||0));
   if (!Number.isFinite(offset)) throw fail(400,'Pagination invalide.');
   const where = "($1::text='' OR strpos(lower(pseudo),lower($1))>0 OR strpos(coalesce(phone,''),$1)>0 OR id::text=$1 OR client_id::text=$1)";
-  const { rows } = await pool.query(`SELECT id,client_id,pseudo,balance,bonus_balance,phone,created_at,
+  const { rows } = await pool.query(`SELECT id,client_id,pseudo,account_role,balance,bonus_balance,phone,created_at,
     phone_registered_at,phone_verified_at,phone_verification_deadline FROM maf_users
     WHERE ${where} ORDER BY created_at DESC,id DESC LIMIT $2 OFFSET $3`,[q,limit,offset]);
   const total = (await pool.query(`SELECT count(*)::integer AS total FROM maf_users WHERE ${where}`,[q])).rows[0].total;
-  res.json({ users:rows,total,limit,offset });
+  res.json({ users:rows.map(row=>({...row,account_role:row.id === ownerId ? 'owner' : row.account_role})),total,limit,offset,can_delete:canDelete });
+}));
+// A test-admin coupon or API key alone never grants account-deletion rights.
+walletRouter.delete('/admin/users/:id', requireSession, route(async (req,res) => {
+  if (!/^[1-9]\d*$/.test(req.params.id)) throw fail(400, 'Identifiant invalide.');
+  let deleted;
+  try {
+    deleted = await tx(c => deleteEmptyAccount(c, req.userId, Number(req.params.id), req.body?.confirmation));
+  } catch (error) {
+    if (error.code === '23503') throw fail(409, 'Suppression refusée : ce compte possède un historique lié (transactions, tournois ou parrainage).');
+    throw error;
+  }
+  res.json({ deleted });
 }));
 walletRouter.get('/admin/summary', route(async (_req,res) => {
   const users = (await pool.query('SELECT count(*)::integer AS total FROM maf_users')).rows[0].total;

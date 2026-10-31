@@ -265,7 +265,7 @@ chatRouter.use("/admin/chat", (req, res, next) => {
   if (!pool) return fail(res, 503, "Base de donnees non configuree.");
   req.adminActor = actor;
   ensureChatTable().then(
-    () => next(),
+    () => actor.startsWith('admin:test-user:') ? requireSession(req, res, next) : next(),
     (error) => {
       console.error("Table maf_chat :", error.message);
       fail(res, 500, "Erreur base de donnees.");
