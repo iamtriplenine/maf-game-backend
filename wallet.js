@@ -1,3 +1,4 @@
+import { ensureReferralCommissions, creditReferralDeposit } from './referralCommissions.js';
 import { isOwnerAccount, ownerAccountId } from './accountRoles.js';
 import crypto from 'node:crypto';
 import { feeFor } from './walletFees.js';
@@ -80,6 +81,7 @@ export function ensureWallet() {
           details jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
         );
       `);
+      await ensureReferralCommissions(c);
       await refundPendingBonusWithdrawalFees(c);
       await c.query('COMMIT');
     } catch (e) { await c.query('ROLLBACK'); throw e; } finally { c.release(); }
@@ -343,9 +345,11 @@ for (const kind of ['deposit','withdrawal']) for (const decision of ['approve','
     if (decision === 'approve' && (reference.length < 4 || reference.length > 160)) throw fail(400,'Reference Wave verifiee requise (4 a 160 caracteres).');
     if (decision === 'reject' && !note) throw fail(400,'Motif du refus requis.');
     const row = await tx(async c => {
-      // Toujours verrouiller utilisateur puis transaction pour eviter les interblocages.
-      const info = (await c.query('SELECT user_id FROM maf_transactions WHERE id=$1',[req.params.id])).rows[0];
+      // Depot parraine : verrouiller les deux comptes par ID croissant, puis la transaction.
+      const info = (await c.query('SELECT t.user_id,r.partner_id FROM maf_transactions t LEFT JOIN maf_user_referrals r ON r.user_id=t.user_id WHERE t.id=$1',[req.params.id])).rows[0];
       if (!info) throw fail(404,'Demande introuvable.');
+      if (kind === 'deposit' && decision === 'approve' && info.partner_id)
+        await c.query('SELECT id FROM maf_users WHERE id IN ($1,$2) ORDER BY id FOR UPDATE',[info.user_id,info.partner_id]);
       const u = await user(c,info.user_id);
       const t = (await c.query('SELECT * FROM maf_transactions WHERE id=$1 FOR UPDATE',[req.params.id])).rows[0];
       if (t.kind !== kind) throw fail(404,'Demande introuvable.');
@@ -364,6 +368,7 @@ for (const kind of ['deposit','withdrawal']) for (const decision of ['approve','
         if (u[column] > 2_147_483_647-credit) throw fail(409,'Plafond du solde atteint.');
         await c.query(`UPDATE maf_users SET ${column}=${column}+$2 WHERE id=$1`,[u.id,credit]);
       }
+      if (kind === 'deposit' && decision === 'approve') await creditReferralDeposit(c,t,req.adminActor);
       // Crediter les 18 % UNE SEULE FOIS, au moment de la validation du retrait,
       // dans la MEME transaction SQL que la validation. Aucun credit si refus.
       if (kind === 'withdrawal' && decision === 'approve' && Number(t.owner_fee_amount || 0) > 0) {
