@@ -34,9 +34,7 @@ export function ensureWallet() {
       await c.query(`
         ALTER TABLE maf_users ADD COLUMN IF NOT EXISTS bonus_balance integer NOT NULL DEFAULT 0;
         ALTER TABLE maf_users ADD COLUMN IF NOT EXISTS phone_registered_at timestamptz;
-        ALTER TABLE maf_users ADD COLUMN IF NOT EXISTS phone_verification_deadline timestamptz;
-        ALTER TABLE maf_users ADD COLUMN IF NOT EXISTS phone_verified_at timestamptz;
-        UPDATE maf_users SET phone_registered_at=now(), phone_verification_deadline=now()+interval '10 days'
+        UPDATE maf_users SET phone_registered_at=now()
           WHERE phone IS NOT NULL AND phone_registered_at IS NULL;
         CREATE TABLE IF NOT EXISTS maf_transactions (
           id uuid PRIMARY KEY, user_id integer NOT NULL REFERENCES maf_users(id),
@@ -102,9 +100,8 @@ async function user(c, id) {
   return rows[0];
 }
 function activePhone(u) {
+  // Seul le numero definitif du compte est utilise, sans echeance ni validation manuelle.
   if (!u.phone) throw fail(409, 'Enregistre ton numero de telephone avant de continuer.');
-  if (!u.phone_verified_at && (!u.phone_verification_deadline || new Date(u.phone_verification_deadline) <= new Date()))
-    throw fail(403, 'Le delai de 10 jours est termine. La verification du numero est necessaire.');
 }
 const amount = value => {
   if (!Number.isSafeInteger(value) || value < MIN || value > MAX) throw fail(400, 'Montant entier requis : 100 a 1 000 000 F CFA.');
@@ -202,8 +199,8 @@ walletRouter.post('/wallet/phone', route(async (req,res) => {
     let u = await user(c,req.userId);
     if (u.phone && normalizePhone(u.phone) !== phone) throw fail(409, 'Le numero est definitif et ne peut pas etre modifie.');
     if (!u.phone) {
-      u = (await c.query(`UPDATE maf_users SET phone=$2,phone_registered_at=now(),
-        phone_verification_deadline=now()+interval '10 days' WHERE id=$1 RETURNING *`,[u.id,phone])).rows[0];
+      u = (await c.query(`UPDATE maf_users SET phone=$2,phone_registered_at=now()
+        WHERE id=$1 RETURNING *`,[u.id,phone])).rows[0];
       await audit(c,`user:${u.id}`,'phone_registered',{ phone });
     }
     return publicUser(u);
@@ -392,26 +389,6 @@ for (const kind of ['deposit','withdrawal']) for (const decision of ['approve','
     }); res.json({ transaction:view(row) });
   }));
 }
-walletRouter.get('/admin/phones', route(async (req,res) => {
-  const limit = Math.floor(Math.min(100,Math.max(1,Number(req.query.limit)||50)));
-  const offset = Math.floor(Math.max(0,Number(req.query.offset)||0));
-  const { rows } = await pool.query(`SELECT id,pseudo,phone,phone_registered_at,phone_verification_deadline,phone_verified_at
-    FROM maf_users WHERE phone IS NOT NULL AND phone_verified_at IS NULL ORDER BY phone_verification_deadline,id LIMIT $1 OFFSET $2`,[limit,offset]);
-  res.json({ users:rows });
-}));
-walletRouter.post('/admin/users/:id/verify-phone', route(async (req,res) => {
-  const id = Number(req.params.id);
-  if (!Number.isSafeInteger(id) || id < 1) throw fail(400,'Identifiant invalide.');
-  const note = typeof req.body.note === 'string' ? req.body.note.trim().slice(0,1000) : '';
-  if (!note) throw fail(400,'Indique la preuve ou methode de verification dans note.');
-  const result = await tx(async c => {
-    const u = await user(c,id);
-    if (!u.phone) throw fail(409,'Aucun numero enregistre.');
-    if (u.phone_verified_at) return publicUser(u);
-    const updated = (await c.query('UPDATE maf_users SET phone_verified_at=now() WHERE id=$1 RETURNING *',[id])).rows[0];
-    await audit(c,req.adminActor,'phone_verified',{ user_id:id,phone:u.phone,note }); return publicUser(updated);
-  }); res.json({ user:result });
-}));
 // Un coupon utilise n'est jamais reactive : son compteur et ses utilisations restent conserves.
 const couponStatus = row => row.uses >= row.max_uses || (row.expires_at && new Date(row.expires_at).getTime() <= Date.now())
   ? 'expired' : row.active ? 'active' : 'disabled';
@@ -507,8 +484,8 @@ walletRouter.get('/admin/users', route(async (req,res) => {
   const offset = Math.floor(Math.max(0,Number(req.query.offset)||0));
   if (!Number.isFinite(offset)) throw fail(400,'Pagination invalide.');
   const where = "($1::text='' OR strpos(lower(pseudo),lower($1))>0 OR strpos(coalesce(phone,''),$1)>0 OR id::text=$1 OR client_id::text=$1)";
-  const { rows } = await pool.query(`SELECT id,client_id,pseudo,account_role,balance,bonus_balance,phone,created_at,
-    phone_registered_at,phone_verified_at,phone_verification_deadline FROM maf_users
+  const { rows } = await pool.query(`SELECT id,client_id,pseudo,account_role,balance,bonus_balance,phone,created_at
+    FROM maf_users
     WHERE ${where} ORDER BY created_at DESC,id DESC LIMIT $2 OFFSET $3`,[q,limit,offset]);
   const total = (await pool.query(`SELECT count(*)::integer AS total FROM maf_users WHERE ${where}`,[q])).rows[0].total;
   res.json({ users:rows.map(row=>({...row,account_role:row.id === ownerId ? 'owner' : row.account_role})),total,limit,offset,can_delete:canDelete });

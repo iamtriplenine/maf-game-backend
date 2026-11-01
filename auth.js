@@ -116,8 +116,6 @@ export const publicUser = (row) => ({
   profile_background_id: publicProfileBackground(row.profile_background_id),
   bonus_balance: row.bonus_balance || 0, phone: row.phone || null,
   phone_registered_at: row.phone_registered_at || null,
-  phone_verification_deadline: row.phone_verification_deadline || null,
-  phone_verified_at: row.phone_verified_at || null,
 });
 const fail = (res, status, error) => res.status(status).json({ error });
 
