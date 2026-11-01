@@ -1,4 +1,5 @@
 import { isOwnerAccount } from './accountRoles.js';
+import { penaltyBracketPlan } from './penaltyTournamentPlan.js';
 // Etape 1 : annonces uniquement. Aucune route de reservation ou de mouvement de solde.
 import { Router } from 'express';
 import { PUBLIC_REWARD_SCENARIOS } from './tournamentPublicRewards.js';
@@ -26,12 +27,12 @@ export function ensureTournaments() {
       await client.query('BEGIN');
       await client.query('SELECT pg_advisory_xact_lock(62498461)');
       await client.query(`CREATE TABLE IF NOT EXISTS maf_tournaments (
-        id serial PRIMARY KEY, game text NOT NULL DEFAULT 'monopoly' CHECK(game='monopoly'),
+        id serial PRIMARY KEY, game text NOT NULL DEFAULT 'monopoly' CHECK(game IN ('monopoly','penalty')),
         title text NOT NULL, description text NOT NULL DEFAULT '',
         starts_at timestamptz NOT NULL, final_at timestamptz NOT NULL,
         status text NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','published','archived')),
-        capacity integer NOT NULL DEFAULT 20 CHECK(capacity=20),
-        entry_fee integer NOT NULL DEFAULT 500 CHECK(entry_fee=500),
+        capacity integer NOT NULL DEFAULT 20 CHECK(capacity=20 OR capacity IN (8,16,32)),
+        entry_fee integer NOT NULL DEFAULT 500 CHECK(entry_fee IN (200,500)),
         revision integer NOT NULL DEFAULT 1,
         creator_id integer NOT NULL REFERENCES maf_users(id),
         created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
@@ -45,7 +46,21 @@ export function ensureTournaments() {
       )`);
       await client.query(`ALTER TABLE maf_tournaments
         ADD COLUMN IF NOT EXISTS participant_skin_id text,
-        ADD COLUMN IF NOT EXISTS winner_skin_id text`);
+        ADD COLUMN IF NOT EXISTS winner_skin_id text,
+        ADD COLUMN IF NOT EXISTS penalty_shots integer NOT NULL DEFAULT 5`);
+      // Elargissement maîtrisé des contraintes de la table existante.
+      await client.query(`ALTER TABLE maf_tournaments
+        DROP CONSTRAINT IF EXISTS maf_tournaments_game_check,
+        DROP CONSTRAINT IF EXISTS maf_tournaments_capacity_check,
+        DROP CONSTRAINT IF EXISTS maf_tournaments_entry_fee_check,
+        DROP CONSTRAINT IF EXISTS maf_tournaments_penalty_shots_check,
+        DROP CONSTRAINT IF EXISTS maf_tournaments_format_check`);
+      await client.query(`ALTER TABLE maf_tournaments
+        ADD CONSTRAINT maf_tournaments_format_check CHECK (
+          (game='monopoly' AND capacity=20 AND entry_fee=500)
+          OR (game='penalty' AND capacity IN (8,16,32) AND entry_fee IN (200,500))
+        ),
+        ADD CONSTRAINT maf_tournaments_penalty_shots_check CHECK (penalty_shots IN (3,5,10))`);
       await ensureReservationTables(client);
       await client.query('COMMIT');
     } catch (e) { await client.query('ROLLBACK'); throw e; }
@@ -55,17 +70,18 @@ export function ensureTournaments() {
 }
 const select = `SELECT t.*, (SELECT count(*)::int FROM maf_tournament_entries e
   WHERE e.tournament_id=t.id AND e.status='reserved') AS registered FROM maf_tournaments t`;
-const registrationIsOpen = row => publicTournamentBookingsEnabled() && row.status === 'published' && row.registration_open === true && Date.parse(row.starts_at) > Date.now();
+const registrationIsOpen = row => row.game === 'monopoly' && publicTournamentBookingsEnabled() && row.status === 'published' && row.registration_open === true && Date.parse(row.starts_at) > Date.now();
 function view(row) {
   return { id: row.id, reference: tournamentReference(row.id), game: row.game, title: row.title, description: row.description,
     startsAt: new Date(row.starts_at).toISOString(), finalAt: new Date(row.final_at).toISOString(),
-    status: row.status, capacity: row.capacity, entryFee: row.entry_fee,
+    status: row.status, capacity: row.capacity, entryFee: row.entry_fee, penaltyShots: Number(row.penalty_shots || 5),
+    ...(row.game === 'penalty' ? { bracket: penaltyBracketPlan(Number(row.capacity), Number(row.entry_fee), Number(row.registered || 0)) } : {}),
     registered: Number(row.registered || 0), revision: row.revision, registrationOpen: registrationIsOpen(row),
-    publicBookingsEnabled: publicTournamentBookingsEnabled(), registrationConfigured: row.registration_open === true, full: Number(row.registered || 0) >= row.capacity,
+    publicBookingsEnabled: row.game === 'monopoly' && publicTournamentBookingsEnabled(), registrationConfigured: row.registration_open === true, full: Number(row.registered || 0) >= row.capacity,
     participantSkinId: row.participant_skin_id || null, winnerSkinId: row.winner_skin_id || null,
     participantSkinName: studioSkin(row.participant_skin_id)?.name || null,
     winnerSkinName: studioSkin(row.winner_skin_id)?.name || null,
-    rewardScenarios: PUBLIC_REWARD_SCENARIOS,
+    rewardScenarios: row.game === 'monopoly' ? PUBLIC_REWARD_SCENARIOS : [],
     rewards: { real: [2000, 1600, 1500, 1400], eliminatedReal: 62.5, bonusEach: 100,
       participantSkins: 1, finalistSkins: 2 } };
 }
@@ -87,16 +103,26 @@ function input(body) {
   if (dates[1] <= dates[0]) throw fail(400, 'La finale doit suivre les qualifications.');
   if (body.status === 'published' && dates[0] <= Date.now())
     throw fail(400, 'Choisis une date de qualification future pour publier cette annonce.');
-  // Les montants et capacites ne peuvent pas etre remplaces par le navigateur.
-  if (['capacity','entryFee','registered','rewards','registrationOpen','game'].some(k => k in body))
-    throw fail(400, 'Le format Monopoly est fixé à 20 places et 500 F.');
+  // Chaque jeu dispose de paramètres autorisés et validés côté serveur.
+  const game = body.game ?? 'monopoly';
+  if (!['monopoly','penalty'].includes(game)) throw fail(400, 'Jeu de tournoi invalide.');
+  if (['registered','rewards','registrationOpen'].some(k => k in body)) throw fail(400,'Champ réservé au serveur.');
+  const capacity = game === 'penalty' ? body.capacity : 20;
+  const entryFee = game === 'penalty' ? body.entryFee : 500;
+  const penaltyShots = game === 'penalty' ? (body.penaltyShots ?? 5) : 5;
+  if (game === 'penalty') {
+    if (![8,16,32].includes(capacity) || ![200,500].includes(entryFee) || ![3,5,10].includes(penaltyShots))
+      throw fail(400,'Choisis 8, 16 ou 32 places, une mise de 200 ou 500 F et 3, 5 ou 10 tirs.');
+  } else if (['capacity','entryFee','game','penaltyShots'].some(k => k in body)) {
+    throw fail(400,'Le tournoi Monopoly conserve son format initial.');
+  }
   let participantSkinId, winnerSkinId;
   try {
     participantSkinId=selectedTournamentSkin(body.participantSkinId);
     winnerSkinId=selectedTournamentSkin(body.winnerSkinId);
   } catch (error) { throw fail(400,error.message); }
   return [title, description, new Date(dates[0]).toISOString(), new Date(dates[1]).toISOString(), body.status,
-    participantSkinId, winnerSkinId];
+    participantSkinId, winnerSkinId, game, capacity, entryFee, penaltyShots];
 }
 async function owner(req) {
   if (!await isOwnerAccount(req.userId, pool)) throw fail(403, 'Accès réservé au propriétaire.');
@@ -129,8 +155,10 @@ tournamentsRouter.post('/owner', requireSession, run(async (req,res) => {
   await owner(req);
   const values = input(req.body);
   const { rows } = await pool.query(`INSERT INTO maf_tournaments
-    (title,description,starts_at,final_at,status,participant_skin_id,winner_skin_id,creator_id,registration_open)
-    VALUES($1,$2,$3,$4,$5,$6,$7,$8,($5='published')) RETURNING *`, [...values, req.userId]);
+    (title,description,starts_at,final_at,status,participant_skin_id,winner_skin_id,
+     game,capacity,entry_fee,penalty_shots,creator_id,registration_open)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
+      (CASE WHEN $8='monopoly' THEN $5='published' ELSE false END)) RETURNING *`, [...values, req.userId]);
   res.status(201).json({ tournament: view(rows[0]), serverNow: Date.now() });
 }));
 tournamentsRouter.put('/owner/:id', requireSession, run(async (req,res) => {
@@ -146,12 +174,15 @@ tournamentsRouter.put('/owner/:id', requireSession, run(async (req,res) => {
     const row = rows[0];
     if (!row) throw fail(404, 'Tournoi introuvable.');
     if (row.revision !== revision) throw fail(409, 'Ce tournoi a été modifié ailleurs. Recharge la liste avant de réessayer.');
+    if (row.game !== values[7]) throw fail(409,'Le jeu d’un tournoi existant ne peut pas être changé.');
     if (Number(row.registered) > 0) throw fail(409, 'Ce tournoi comporte des réservations : modification bloquée.');
     const updated = await client.query(`UPDATE maf_tournaments SET title=$1,description=$2,starts_at=$3,
-      final_at=$4,status=$5,participant_skin_id=$6,winner_skin_id=$7,registration_open=CASE
+      final_at=$4,status=$5,participant_skin_id=$6,winner_skin_id=$7,
+      capacity=$9,entry_fee=$10,penalty_shots=$11,registration_open=CASE
+        WHEN $8='penalty' THEN false
         WHEN status <> 'published' AND $5='published' THEN true
         WHEN $5 <> 'published' THEN false
-        ELSE registration_open END,revision=revision+1,updated_at=now() WHERE id=$8 RETURNING *`, [...values,id]);
+        ELSE registration_open END,revision=revision+1,updated_at=now() WHERE id=$12 RETURNING *`, [...values,id]);
     await client.query('COMMIT');
     res.json({ tournament: view(updated.rows[0]), serverNow: Date.now() });
   } catch (e) { await client.query('ROLLBACK'); throw e; }

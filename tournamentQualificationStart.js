@@ -81,7 +81,7 @@ export async function startDueQualifications() {
   if(!realQualificationEnabled())return {enabled:false,started:0};
   await ensureQualificationTables();
   const {rows}=await pool.query(`SELECT id FROM maf_tournaments
-    WHERE status='published' AND deleted_at IS NULL AND cancelled_at IS NULL AND starts_at<=now()
+    WHERE game='monopoly' AND status='published' AND deleted_at IS NULL AND cancelled_at IS NULL AND starts_at<=now()
     ORDER BY starts_at,id LIMIT 100`);
   let started=0;
   for(const row of rows){if(await startQualificationTournament(Number(row.id)))started++;}
@@ -96,7 +96,7 @@ export async function startQualificationTournament(id){
   try{
     await c.query('BEGIN');
     const tournament=(await c.query('SELECT * FROM maf_tournaments WHERE id=$1 FOR UPDATE',[id])).rows[0];
-    if(!tournament||tournament.status!=='published'||tournament.deleted_at||tournament.cancelled_at||
+    if(!tournament||tournament.game!=='monopoly'||tournament.status!=='published'||tournament.deleted_at||tournament.cancelled_at||
        new Date(tournament.starts_at).getTime()>Date.now()){
       await c.query('COMMIT');return false;
     }

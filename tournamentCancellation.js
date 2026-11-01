@@ -111,7 +111,7 @@ export async function cancelTournament(id, reason, expectedRevision = null) {
       if (reason === 'incomplete') { await c.query('COMMIT'); return null; }
       throw fail(409, 'Qualifications deja lancees : suppression bloquee.');
     }
-    if (Number(tournament.entry_fee) !== 500)
+    if (Number(tournament.entry_fee) !== 500 && entries.length > 0)
       throw fail(409, 'Mise differente de 500 F : remboursement bloque.');
 
     await c.query(`UPDATE maf_tournaments SET status='archived',
@@ -146,7 +146,7 @@ export function maintainTournamentCancellations() {
     await ensureTournamentCancellation();
     const minPlayers = 10;
     const { rows } = await pool.query(`SELECT t.id FROM maf_tournaments t
-      WHERE t.status='published' AND t.cancelled_at IS NULL AND t.starts_at <= now()
+      WHERE t.game='monopoly' AND t.status='published' AND t.cancelled_at IS NULL AND t.starts_at <= now()
         AND (SELECT count(*) FROM maf_tournament_entries e
              WHERE e.tournament_id=t.id AND e.status='reserved') < $1
       ORDER BY t.starts_at,t.id LIMIT 100`, [minPlayers]);
