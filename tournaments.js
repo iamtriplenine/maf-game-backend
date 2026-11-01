@@ -1,6 +1,6 @@
 import { isOwnerAccount } from './accountRoles.js';
 import { penaltyBracketPlan } from './penaltyTournamentPlan.js';
-// Etape 1 : annonces uniquement. Aucune route de reservation ou de mouvement de solde.
+// Etape 2 : reservations pour Monopoly et Tir-au-but, par transaction atomique.
 import { Router } from 'express';
 import { PUBLIC_REWARD_SCENARIOS } from './tournamentPublicRewards.js';
 import { publicTournamentBookingsEnabled } from './tournamentLaunchPolicy.js';
@@ -70,14 +70,14 @@ export function ensureTournaments() {
 }
 const select = `SELECT t.*, (SELECT count(*)::int FROM maf_tournament_entries e
   WHERE e.tournament_id=t.id AND e.status='reserved') AS registered FROM maf_tournaments t`;
-const registrationIsOpen = row => row.game === 'monopoly' && publicTournamentBookingsEnabled() && row.status === 'published' && row.registration_open === true && Date.parse(row.starts_at) > Date.now();
+const registrationIsOpen = row => ['monopoly','penalty'].includes(row.game) && publicTournamentBookingsEnabled() && row.status === 'published' && row.registration_open === true && Date.parse(row.starts_at) > Date.now();
 function view(row) {
   return { id: row.id, reference: tournamentReference(row.id), game: row.game, title: row.title, description: row.description,
     startsAt: new Date(row.starts_at).toISOString(), finalAt: new Date(row.final_at).toISOString(),
     status: row.status, capacity: row.capacity, entryFee: row.entry_fee, penaltyShots: Number(row.penalty_shots || 5),
     ...(row.game === 'penalty' ? { bracket: penaltyBracketPlan(Number(row.capacity), Number(row.entry_fee), Number(row.registered || 0)) } : {}),
     registered: Number(row.registered || 0), revision: row.revision, registrationOpen: registrationIsOpen(row),
-    publicBookingsEnabled: row.game === 'monopoly' && publicTournamentBookingsEnabled(), registrationConfigured: row.registration_open === true, full: Number(row.registered || 0) >= row.capacity,
+    publicBookingsEnabled: ['monopoly','penalty'].includes(row.game) && publicTournamentBookingsEnabled(), registrationConfigured: row.registration_open === true, full: Number(row.registered || 0) >= row.capacity,
     participantSkinId: row.participant_skin_id || null, winnerSkinId: row.winner_skin_id || null,
     participantSkinName: studioSkin(row.participant_skin_id)?.name || null,
     winnerSkinName: studioSkin(row.winner_skin_id)?.name || null,
@@ -179,9 +179,9 @@ tournamentsRouter.put('/owner/:id', requireSession, run(async (req,res) => {
     const updated = await client.query(`UPDATE maf_tournaments SET title=$1,description=$2,starts_at=$3,
       final_at=$4,status=$5,participant_skin_id=$6,winner_skin_id=$7,
       capacity=$9,entry_fee=$10,penalty_shots=$11,registration_open=CASE
-        WHEN $8='penalty' THEN false
-        WHEN status <> 'published' AND $5='published' THEN true
         WHEN $5 <> 'published' THEN false
+        WHEN status <> 'published' AND $5='published' AND $8='monopoly' THEN true
+        WHEN status <> 'published' AND $5='published' AND $8='penalty' THEN false
         ELSE registration_open END,revision=revision+1,updated_at=now() WHERE id=$12 RETURNING *`, [...values,id]);
     await client.query('COMMIT');
     res.json({ tournament: view(updated.rows[0]), serverNow: Date.now() });

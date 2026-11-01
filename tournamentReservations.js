@@ -1,12 +1,11 @@
-// MAF_TOURNOI_ETAPE2_V1 : reservation payante d'une place de tournoi Monopoly.
+// Tournois Monopoly et Tir-au-but : reservation payante d'une seule place.
 // Une seule transaction : verrou du tournoi -> controles -> debit du solde reel -> place -> trace d'audit.
 // Si une etape echoue, tout est annule (jamais de place sans debit, ni de debit sans place).
 // Aucune annulation, aucun remboursement et aucune recompense dans cette etape.
 import { pool } from './db.js';
 import { requireSession } from './auth.js';
 import { publicTournamentBookingsEnabled } from './tournamentLaunchPolicy.js';
-
-const ENTRY_FEE = 500;
+import { paidTournamentEntryFee } from './penaltyRegistrationRules.js';
 
 export async function ensureReservationTables(client) {
   await client.query(`ALTER TABLE maf_tournaments ADD COLUMN IF NOT EXISTS registration_open boolean NOT NULL DEFAULT false`);
@@ -38,8 +37,12 @@ export function mountReservations(router, { select, view, fail, run, owner }) {
       const row = (await client.query('SELECT * FROM maf_tournaments WHERE id=$1 FOR UPDATE', [id])).rows[0];
       if (!row) throw fail(404, 'Tournoi introuvable.');
       if (row.revision !== revision) throw fail(409, 'Ce tournoi a été modifié ailleurs. Recharge la liste avant de réessayer.');
-      if (open && row.game !== 'monopoly') throw fail(409,'Inscriptions de ce jeu non encore ouvertes.');
-      if (open && !publicTournamentBookingsEnabled()) throw fail(409, 'Ouverture payante suspendue : qualifications, finale et paiements doivent etre valides en preproduction avant activation.');
+      if (open) {
+        try { paidTournamentEntryFee(row); }
+        catch { throw fail(409, 'Parametres financiers du tournoi incoherents.'); }
+      }
+      if (open && !publicTournamentBookingsEnabled()) throw fail(409, 'Ouverture des inscriptions momentanement indisponible.');
+      if (open && (row.deleted_at || row.cancelled_at)) throw fail(409,'Tournoi annule ou retire.');
       if (open && row.status !== 'published') throw fail(409, 'Publie l’annonce avant d’ouvrir les réservations.');
       if (open && Date.parse(row.starts_at) <= Date.now()) throw fail(409, 'L’heure des qualifications est passée.');
       await client.query('UPDATE maf_tournaments SET registration_open=$2,revision=revision+1,updated_at=now() WHERE id=$1', [id, open]);
@@ -53,19 +56,22 @@ export function mountReservations(router, { select, view, fail, run, owner }) {
     finally { client.release(); }
   }));
 
-  // Joueur : reserver une place (500 F du solde reel). Rejouer la meme demande ne debite jamais deux fois.
+  // Joueur : reserver une place (mise officielle par jeu). Une relance ne debite jamais deux fois.
   router.post('/:id/reserve', requireSession, run(async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isSafeInteger(id) || id < 1) throw fail(400, 'Tournoi invalide.');
     const client = await pool.connect();
     let result;
+    let paidFee;
     try {
       await client.query('BEGIN');
       // Le verrou du tournoi serialise toutes les reservations : la capacite ne peut pas etre depassee.
       const t = (await client.query('SELECT * FROM maf_tournaments WHERE id=$1 FOR UPDATE', [id])).rows[0];
-      if (!t || t.status !== 'published') throw fail(404, 'Tournoi introuvable.');
-      if (t.game !== 'monopoly') throw fail(409,'Inscriptions de ce jeu non encore ouvertes.');
-      if (!publicTournamentBookingsEnabled()) throw fail(409, 'Reservations payantes suspendues pendant la validation du grand tournoi.');
+      if (!t || t.status !== 'published' || t.deleted_at || t.cancelled_at) throw fail(404, 'Tournoi introuvable.');
+      let entryFee;
+      try { entryFee = paidTournamentEntryFee(t); paidFee = entryFee; }
+      catch { throw fail(409,'Parametres financiers du tournoi incoherents.'); }
+      if (!publicTournamentBookingsEnabled()) throw fail(409, 'Reservations momentanement indisponibles.');
       if (!t.registration_open) throw fail(409, 'Les inscriptions ne sont pas ouvertes.');
       if (Date.parse(t.starts_at) <= Date.now()) throw fail(409, 'Les inscriptions sont closes : les qualifications ont commencé.');
       const mine = (await client.query(
@@ -81,16 +87,16 @@ export function mountReservations(router, { select, view, fail, run, owner }) {
           "SELECT count(*)::int AS n FROM maf_tournament_entries WHERE tournament_id=$1 AND status='reserved'", [id])).rows[0].n;
         if (taken >= t.capacity) throw fail(409, `Complet : les ${t.capacity} places sont prises.`);
         const debit = await client.query(
-          'UPDATE maf_users SET balance=balance-$2 WHERE id=$1 AND balance>=$2 RETURNING balance', [req.userId, ENTRY_FEE]);
+          'UPDATE maf_users SET balance=balance-$2 WHERE id=$1 AND balance>=$2 RETURNING balance', [req.userId, entryFee]);
         if (!debit.rowCount) {
           const exists = (await client.query('SELECT 1 FROM maf_users WHERE id=$1', [req.userId])).rowCount;
-          throw exists ? fail(402, `Solde réel insuffisant : il faut ${ENTRY_FEE} F pour réserver une place.`) : fail(401, 'Compte introuvable.');
+          throw exists ? fail(402, `Solde insuffisant : il faut ${entryFee} F pour réserver une place.`) : fail(401, 'Compte introuvable.');
         }
         await client.query(
           "INSERT INTO maf_tournament_entries(tournament_id,user_id,status,fee_paid) VALUES($1,$2,'reserved',$3)",
-          [id, req.userId, ENTRY_FEE]);
+          [id, req.userId, entryFee]);
         await client.query(`INSERT INTO maf_wallet_audit(actor,event,details) VALUES('system:tournament','tournament_entry',$1)`,
-          [JSON.stringify({ tournament_id: id, user_id: req.userId, amount: ENTRY_FEE, balance_after: debit.rows[0].balance, place: taken + 1 })]);
+          [JSON.stringify({ tournament_id: id, user_id: req.userId, amount: entryFee, balance_after: debit.rows[0].balance, place: taken + 1 })]);
         await client.query('COMMIT');
         result = { alreadyReserved: false, balanceAfter: debit.rows[0].balance, place: taken + 1 };
       }
@@ -98,6 +104,6 @@ export function mountReservations(router, { select, view, fail, run, owner }) {
     finally { client.release(); }
     const fresh = (await pool.query(select + ' WHERE t.id=$1', [id])).rows[0];
     res.status(result.alreadyReserved ? 200 : 201).json({
-      reservation: { tournamentId: id, fee: ENTRY_FEE, ...result }, tournament: view(fresh), serverNow: Date.now() });
+      reservation: { tournamentId: id, fee: paidFee, ...result }, tournament: view(fresh), serverNow: Date.now() });
   }));
 }

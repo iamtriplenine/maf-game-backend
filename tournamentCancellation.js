@@ -5,6 +5,7 @@ import { Router } from 'express';
 import { pool } from './db.js';
 import { ensureTournaments } from './tournaments.js';
 import { requireSession } from './auth.js';
+import { refundablePaidAmount } from './penaltyRegistrationRules.js';
 
 export const tournamentCancellationRouter = Router();
 const fail = (status, message) => Object.assign(new Error(message), { status });
@@ -24,11 +25,13 @@ export function ensureTournamentCancellation() {
         CREATE TABLE IF NOT EXISTS maf_tournament_refunds (
           tournament_id integer NOT NULL REFERENCES maf_tournaments(id),
           user_id integer NOT NULL REFERENCES maf_users(id),
-          amount integer NOT NULL CHECK (amount=500),
+          amount integer NOT NULL CHECK (amount IN (200,500)),
           reason text NOT NULL CHECK(reason IN ('owner_deleted','incomplete')),
           created_at timestamptz NOT NULL DEFAULT now(),
           PRIMARY KEY(tournament_id,user_id)
         );
+        ALTER TABLE maf_tournament_refunds DROP CONSTRAINT IF EXISTS maf_tournament_refunds_amount_check;
+        ALTER TABLE maf_tournament_refunds ADD CONSTRAINT maf_tournament_refunds_amount_check CHECK (amount IN (200,500));
         -- Verrouille aussi les nouvelles reservations : pas de course entre
         -- une inscription payante et une suppression/annulation.
         CREATE OR REPLACE FUNCTION maf_tournament_reservation_guard()
@@ -89,18 +92,17 @@ export async function cancelTournament(id, reason, expectedRevision = null) {
     )) { await c.query('COMMIT'); return null; }
 
     const entries = (await c.query(`
-      SELECT user_id FROM maf_tournament_entries
+      SELECT user_id,fee_paid FROM maf_tournament_entries
       WHERE tournament_id=$1 AND status='reserved' ORDER BY user_id FOR UPDATE`, [id]
     )).rows;
-    if (reason === 'incomplete' && entries.length >=
-        (10)) {
+    if (reason === 'incomplete' && (tournament.game !== 'penalty') && entries.length >= 10) {
       await c.query('COMMIT');
       return null;
     }
     // Apres un depart presume complet, eviter un remboursement qui
     // contredirait les gains d'une partie eventuellement en cours.
     if (reason === 'owner_deleted' && new Date(tournament.starts_at).getTime() <= Date.now()
-        && entries.length >= 10)
+        && entries.length >= (tournament.game === 'penalty' ? 2 : 10))
       throw fail(409, 'Tournoi complet deja arrive a son heure : suppression bloquee pour proteger les gains.');
     // Une qualification deja lancee ne doit JAMAIS etre remboursee
     // par la tache d'annulation, meme si le feature flag est desactive plus tard.
@@ -111,29 +113,35 @@ export async function cancelTournament(id, reason, expectedRevision = null) {
       if (reason === 'incomplete') { await c.query('COMMIT'); return null; }
       throw fail(409, 'Qualifications deja lancees : suppression bloquee.');
     }
-    if (Number(tournament.entry_fee) !== 500 && entries.length > 0)
-      throw fail(409, 'Mise differente de 500 F : remboursement bloque.');
+    for (const entry of entries) {
+      try { refundablePaidAmount(tournament, entry); }
+      catch { throw fail(409, 'Remboursement bloque : mise enregistree incoherente.'); }
+    }
 
     await c.query(`UPDATE maf_tournaments SET status='archived',
       cancelled_at=COALESCE(cancelled_at,now()),
       cancellation_reason=COALESCE(cancellation_reason,$2),
       deleted_at=CASE WHEN $2='owner_deleted' THEN now() ELSE deleted_at END,
       revision=revision+1, updated_at=now() WHERE id=$1`, [id, reason]);
-    let refunded = 0;
+    let refunded = 0, refundTotal = 0;
     for (const entry of entries) {
+      const fee = refundablePaidAmount(tournament, entry);
       const ledger = await c.query(`INSERT INTO maf_tournament_refunds
-        (tournament_id,user_id,amount,reason) VALUES($1,$2,500,$3)
-        ON CONFLICT(tournament_id,user_id) DO NOTHING RETURNING user_id`, [id, entry.user_id, reason]);
+        (tournament_id,user_id,amount,reason) VALUES($1,$2,$3,$4)
+        ON CONFLICT(tournament_id,user_id) DO NOTHING RETURNING user_id`, [id, entry.user_id, fee, reason]);
       if (ledger.rowCount === 1) {
-        const credited = await c.query('UPDATE maf_users SET balance=balance+500 WHERE id=$1 RETURNING id', [entry.user_id]);
+        const credited = await c.query('UPDATE maf_users SET balance=balance+$2 WHERE id=$1 RETURNING id', [entry.user_id, fee]);
         if (credited.rowCount !== 1) throw fail(500, 'Compte introuvable, remboursement annule.');
-        refunded++;
+        refunded++; refundTotal += fee;
+        await c.query(`INSERT INTO maf_wallet_audit(actor,event,details)
+          VALUES('system:tournament','tournament_entry_refunded',$1::jsonb)`,
+          [JSON.stringify({ tournament_id:id, user_id:entry.user_id, amount:fee, reason })]);
       }
       await c.query(`UPDATE maf_tournament_entries SET status='refunded'
         WHERE tournament_id=$1 AND user_id=$2 AND status='reserved'`, [id,entry.user_id]);
     }
     await c.query('COMMIT');
-    return { deleted: reason === 'owner_deleted', refunded, refundTotal: refunded * 500, reason };
+    return { deleted: reason === 'owner_deleted', refunded, refundTotal, reason };
   } catch (e) { await c.query('ROLLBACK').catch(() => {}); throw e; }
   finally { c.release(); }
 }
@@ -146,9 +154,9 @@ export function maintainTournamentCancellations() {
     await ensureTournamentCancellation();
     const minPlayers = 10;
     const { rows } = await pool.query(`SELECT t.id FROM maf_tournaments t
-      WHERE t.game='monopoly' AND t.status='published' AND t.cancelled_at IS NULL AND t.starts_at <= now()
-        AND (SELECT count(*) FROM maf_tournament_entries e
-             WHERE e.tournament_id=t.id AND e.status='reserved') < $1
+      WHERE t.game IN ('monopoly','penalty') AND t.status='published' AND t.cancelled_at IS NULL AND t.starts_at <= now()
+        AND (t.game='penalty' OR (SELECT count(*) FROM maf_tournament_entries e
+             WHERE e.tournament_id=t.id AND e.status='reserved') < $1)
       ORDER BY t.starts_at,t.id LIMIT 100`, [minPlayers]);
     let cancelled = 0;
     for (const row of rows) {
