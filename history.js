@@ -4,6 +4,7 @@ import { pool } from './db.js';
 import { requireSession } from './auth.js';
 import { ensureRooms } from './rooms.js';
 import { ensureMonopolyRooms } from './monopolyRooms.js';
+import { ensureTournaments } from './tournaments.js';
 
 export const historyRouter = Router();
 const route = fn => async (req,res,next) => {
@@ -29,7 +30,7 @@ historyRouter.use((_req,res,next) => {
   next();
 });
 historyRouter.use(requireSession);
-historyRouter.use((_req,_res,next) => { ensureRooms().then(() => ensureMonopolyRooms()).then(() => next(),next); });
+historyRouter.use((_req,_res,next) => { ensureRooms().then(() => ensureMonopolyRooms()).then(() => ensureTournaments()).then(() => next(),next); });
 
 // Une demande de depot/retrait garde une seule ligne avec son etat courant.
 // Les mouvements des jeux proviennent du journal atomique, sans doubler les paiements.
@@ -77,6 +78,31 @@ const transactions = `
   WHERE (a.event='monopoly_stake_locked' AND a.details->'ids' @> jsonb_build_array($1::integer))
     OR (a.event='monopoly_payout' AND a.details->>'winner'=$1::text)
     OR a.event IN ('monopoly_refund','monopoly_timeout_refund')
+  UNION ALL
+  SELECT 'tstake:' || a.id::text,'tournament_stake',(a.details->>'amount')::integer,'F','approved',
+    -(a.details->>'amount')::integer,NULL,
+    'Tournoi #' || (a.details->>'tournament_id') || coalesce(' · ' || tt.title,''),NULL,a.created_at,NULL,NULL,0,
+    (a.details->>'amount')::integer
+  FROM maf_wallet_audit a LEFT JOIN maf_tournaments tt ON tt.id=(a.details->>'tournament_id')::integer
+  WHERE a.event='tournament_entry' AND a.details->>'user_id'=$1::text
+  UNION ALL
+  SELECT 'trefund:' || a.id::text,'tournament_refund',(a.details->>'amount')::integer,'F','approved',
+    (a.details->>'amount')::integer,NULL,
+    'Tournoi #' || (a.details->>'tournament_id') || coalesce(' · ' || tt.title,'') ||
+      CASE WHEN a.event='tournament_surplus_refunded' THEN ' · dernier inscrit, effectif impair' ELSE ' · tournoi annulé ou incomplet' END,
+    NULL,a.created_at,NULL,NULL,0,(a.details->>'amount')::integer
+  FROM maf_wallet_audit a LEFT JOIN maf_tournaments tt ON tt.id=(a.details->>'tournament_id')::integer
+  WHERE a.event IN ('tournament_entry_refunded','tournament_surplus_refunded') AND a.details->>'user_id'=$1::text
+  UNION ALL
+  SELECT 'tpay:' || a.id::text || ':' || (l->>'user_id'),'tournament_payout',(l->>'amount')::integer,'F','approved',
+    (l->>'amount')::integer,NULL,
+    'Tournoi #' || (a.details->>'tournament_id') || coalesce(' · ' || tt.title,'') || ' · ' ||
+      CASE l->>'role' WHEN 'champion' THEN 'champion' WHEN 'finaliste' THEN 'finaliste' ELSE 'demi-finaliste' END,
+    NULL,a.created_at,NULL,NULL,0,(l->>'amount')::integer
+  FROM maf_wallet_audit a
+    CROSS JOIN LATERAL jsonb_array_elements(a.details->'lines') l
+    LEFT JOIN maf_tournaments tt ON tt.id=(a.details->>'tournament_id')::integer
+  WHERE a.event='tournament_penalty_awards_credited' AND l->>'user_id'=$1::text AND (l->>'amount')::integer>0
 `;
 historyRouter.get('/transactions',route(async (req,res) => {
   const { limit,offset } = pagination(req);
