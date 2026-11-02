@@ -8,6 +8,7 @@ import {selectedSkinGrants} from './studioSkinCatalog.js';
 import {ensurePenaltyProgressTables} from './tournamentPenaltyProgress.js';
 import {realTournamentFeaturesEnabled} from './tournamentLaunchPolicy.js';
 import {penaltyAwardBudget,certifyPenaltyBracket} from './penaltyTournamentAwardRules.js';
+import {ensureTournamentGifts} from './tournamentGiftCenter.js';
 
 export const tournamentPenaltyAwardsRouter=Router();
 const fail=(status,message)=>Object.assign(new Error(message),{status});
@@ -76,6 +77,7 @@ export async function settlePenaltyTournamentAwards(tournamentId){
  if(!realTournamentFeaturesEnabled())return {enabled:false,credited:false};
  const tournament=id(tournamentId);
  await ensurePenaltyAwardTables();
+ await ensureTournamentGifts();
  const c=await pool.connect();
  try{
   await c.query('BEGIN');
@@ -87,6 +89,11 @@ export async function settlePenaltyTournamentAwards(tournamentId){
     WHERE tournament_id=$1 FOR UPDATE`,[tournament])).rows[0];
   if(existing?.status==='credited'){
    await c.query('COMMIT');return {credited:true,alreadyCredited:true,tournamentId:tournament};
+  }
+  // Remise des cadeaux : ni francs ni skins avant la date programmee dans le formulaire.
+  const sched=(await c.query(`SELECT release_at FROM maf_tournament_gift_schedule WHERE tournament_id=$1`,[tournament])).rows[0];
+  if(!sched || new Date(sched.release_at).getTime()>Date.now()){
+   await c.query('ROLLBACK');return {credited:false,waiting:true,tournamentId:tournament};
   }
   // Toutes les pieces du dossier sont lues dans la transaction et revérifiees.
   const draw=(await c.query(`SELECT * FROM maf_tournament_penalty_draws
@@ -150,8 +157,10 @@ export function maintainPenaltyTournamentAwards(){
  processing=(async()=>{
   if(!realTournamentFeaturesEnabled())return {enabled:false};
   await ensurePenaltyAwardTables();
+  await ensureTournamentGifts();
   const {rows}=await pool.query(`SELECT t.id FROM maf_tournaments t
    JOIN maf_tournament_penalty_champions ch ON ch.tournament_id=t.id
+   JOIN maf_tournament_gift_schedule gs ON gs.tournament_id=t.id AND gs.release_at<=now()
    LEFT JOIN maf_tournament_penalty_award_batches b ON b.tournament_id=t.id
    WHERE t.game='penalty' AND t.status='published' AND t.cancelled_at IS NULL
     AND t.deleted_at IS NULL AND b.tournament_id IS NULL
@@ -195,7 +204,11 @@ tournamentPenaltyAwardsRouter.get('/penalty/awards/:id',requireSession,route(asy
  const t=(await pool.query(`SELECT id,title,game FROM maf_tournaments WHERE id=$1`,[tournament])).rows[0];
  if(!t||t.game!=='penalty')throw fail(404,'Tournoi introuvable.');
  const b=(await pool.query(`SELECT * FROM maf_tournament_penalty_award_batches WHERE tournament_id=$1`,[tournament])).rows[0];
- if(!b)return res.json({tournamentId:tournament,status:'pending'});
+ if(!b){
+  await ensureTournamentGifts();
+  const g=(await pool.query('SELECT release_at FROM maf_tournament_gift_schedule WHERE tournament_id=$1',[tournament])).rows[0];
+  return res.json({tournamentId:tournament,status:'pending',releaseAt:g?new Date(g.release_at).toISOString():null});
+ }
  const {rows}=await pool.query(`SELECT l.place,l.role,l.amount_franc,u.pseudo AS name,l.user_id
   FROM maf_tournament_penalty_award_lines l JOIN maf_users u ON u.id=l.user_id
   WHERE l.tournament_id=$1 ORDER BY l.place,l.user_id`,[tournament]);

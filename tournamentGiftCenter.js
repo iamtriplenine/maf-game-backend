@@ -11,6 +11,7 @@ import { postponedGiftAt } from './tournamentLiveRules.js';
 import { studioSkin } from './studioSkinCatalog.js';
 import { ensureTournamentSkinTables } from './tournamentSkins.js';
 import { legacyGiftHiddenBefore } from './ownerGifts.js';
+import { ensurePenaltyAwardTables } from './tournamentPenaltyAwards.js';
 
 export const tournamentGiftRouter = Router();
 const problem=(status,message)=>Object.assign(new Error(message),{status});
@@ -31,7 +32,7 @@ async function ensureOwner(userId){
 let ready;
 export function ensureTournamentGifts(){
   if(!ready)ready=(async()=>{
-    await ensureTournamentAwardTables();await ensureTournamentSkinTables();
+    await ensureTournamentAwardTables();await ensureTournamentSkinTables();await ensurePenaltyAwardTables();
     const c=await pool.connect();
     try{
       await c.query('BEGIN');
@@ -121,15 +122,20 @@ function output(row,now){
     // Ne jamais reveler de gains prepares ou des informations d'autres comptes.
     ...(credited && ['ready','opened'].includes(status)?{
       reward:{ place:row.place===null?null:Number(row.place),realCents:Number(row.real_franc)*100,realFranc:Number(row.real_franc),
-        bonusCents:Number(row.bonus_franc)*100,bonusFranc:Number(row.bonus_franc),skinsPlanned:row.place===null?1:2,
+        bonusCents:Number(row.bonus_franc)*100,bonusFranc:Number(row.bonus_franc),skinsPlanned:row.game==='penalty'?(row.place===1?2:1):(row.place===null?1:2),
         skinsDelivered:chosen.length>0&&chosen.every(s=>s.unlocked),chosenSkins:chosen }
     }:{}),
   };
 }
-const itemSql=`SELECT t.id,t.title,t.created_at,e.status AS entry_status,g.release_at,o.opened_at,
+const itemSql=`SELECT t.id,t.game,t.title,t.created_at,e.status AS entry_status,g.release_at,o.opened_at,
   t.participant_skin_id,t.winner_skin_id,
   pu.skin_id AS participant_skin_unlocked,wu.skin_id AS winner_skin_unlocked,
-  a.place,a.real_cents,a.bonus_cents,a.real_franc,a.bonus_franc,a.status AS award_status,b.status AS batch_status
+  CASE WHEN t.game='penalty' THEN pl.place ELSE a.place END AS place,
+  a.real_cents,a.bonus_cents,
+  CASE WHEN t.game='penalty' THEN COALESCE(pl.amount_franc,0) ELSE a.real_franc END AS real_franc,
+  CASE WHEN t.game='penalty' THEN 0 ELSE a.bonus_franc END AS bonus_franc,
+  CASE WHEN t.game='penalty' THEN (CASE WHEN pb.tournament_id IS NOT NULL THEN 'credited' END) ELSE a.status END AS award_status,
+  CASE WHEN t.game='penalty' THEN (CASE WHEN pb.tournament_id IS NOT NULL THEN 'credited' END) ELSE b.status END AS batch_status
   FROM maf_tournament_entries e
   JOIN maf_tournaments t ON t.id=e.tournament_id
   LEFT JOIN maf_tournament_gift_schedule g ON g.tournament_id=t.id
@@ -138,6 +144,8 @@ const itemSql=`SELECT t.id,t.title,t.created_at,e.status AS entry_status,g.relea
   LEFT JOIN maf_studio_skin_unlocks wu ON wu.user_id=e.user_id AND wu.skin_id=t.winner_skin_id
   LEFT JOIN maf_tournament_award_lines a ON a.tournament_id=t.id AND a.user_id=e.user_id
   LEFT JOIN maf_tournament_award_batches b ON b.tournament_id=t.id
+  LEFT JOIN maf_tournament_penalty_award_lines pl ON pl.tournament_id=t.id AND pl.user_id=e.user_id
+  LEFT JOIN maf_tournament_penalty_award_batches pb ON pb.tournament_id=t.id
   WHERE e.user_id=$1 AND e.status='reserved'`;
 
 tournamentGiftRouter.use((_,res,next)=>{res.set('Cache-Control','private, no-store');next();});
