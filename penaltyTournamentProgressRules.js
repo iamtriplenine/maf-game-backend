@@ -1,0 +1,41 @@
+// Regles pures de progression du championnat (aucune ecriture de solde ici).
+import { randomInt } from 'node:crypto';
+const valid = n => Number.isSafeInteger(n) && n > 0;
+export function buildNextPenaltyRound(ids, rand = randomInt) {
+  if (!Array.isArray(ids) || ids.length < 1 || ids.length > 32 ||
+      ids.some(x => !valid(x)) || new Set(ids).size !== ids.length)
+    throw new Error('Qualifies invalides ou en double.');
+  const shuffled = [...ids];
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = rand(i + 1);
+    if (!Number.isSafeInteger(j) || j < 0 || j > i) throw new Error('Tirage invalide.');
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  const bye = shuffled.length % 2 ? shuffled.pop() : null;
+  const pairs = [];
+  for (let i = 0; i < shuffled.length; i += 2)
+    pairs.push({matchNo:pairs.length+1,hostId:shuffled[i],guestId:shuffled[i+1]});
+  return {bye, pairs, champion:ids.length===1?ids[0]:null};
+}
+export function penaltyAbsenceDecision(match, now = Date.now()) {
+  if (!['scheduled','waiting','playing'].includes(match.status)) return null;
+  const d = x => x ? new Date(x).getTime() : null;
+  const scheduled=d(match.scheduled_at);
+  if (!Number.isFinite(scheduled) || now < scheduled) return null;
+  const host=d(match.host_seen_at), guest=d(match.guest_seen_at);
+  const active=(seen)=>seen!==null && now-seen<=45000;
+  const hostHere=active(host),guestHere=active(guest);
+  if(match.status!=='playing') {
+    if(now-scheduled<300000)return null; // 5 min pour rejoindre.
+    if(hostHere!==guestHere)return {winner:hostHere?'host':'guest',reason:'absence_initiale'};
+    return {winner:null,reason:'deux_absents'};
+  }
+  const started=d(match.playing_at)??scheduled;
+  const hostRef=host??started,guestRef=guest??started;
+  if(now-hostRef<120000 && now-guestRef<120000)return null;
+  if(hostHere!==guestHere && now-(hostHere?guestRef:hostRef)>=120000)
+    return {winner:hostHere?'host':'guest',reason:'reconnexion_expiree'};
+  if(!hostHere&&!guestHere && now-hostRef>=120000 && now-guestRef>=120000)
+    return {winner:null,reason:'deux_deconnectes'};
+  return null;
+}

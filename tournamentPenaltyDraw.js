@@ -141,12 +141,30 @@ tournamentPenaltyDrawRouter.get('/penalty/mine',requireSession,route(async(req,r
     JOIN maf_users uh ON uh.id=m.host_id JOIN maf_users ug ON ug.id=m.guest_id
     LEFT JOIN maf_users uw ON uw.id=m.winner_id
     WHERE (m.host_id=$1 OR m.guest_id=$1) AND t.deleted_at IS NULL AND t.cancelled_at IS NULL
-    ORDER BY CASE WHEN m.status='finished' THEN 1 ELSE 0 END,m.created_at DESC LIMIT 1`,[req.userId]);
+    ORDER BY CASE WHEN m.status='finished' THEN 1 ELSE 0 END,t.starts_at DESC,m.round_no DESC,m.match_no DESC LIMIT 1`,[req.userId]);
   const lastRefund=(await pool.query(`SELECT t.title,r.tournament_id,r.amount,r.created_at FROM maf_tournament_refunds r
     JOIN maf_tournaments t ON t.id=r.tournament_id
     WHERE r.user_id=$1 AND t.game='penalty' AND r.reason='late_incomplete_group'
     ORDER BY r.created_at DESC LIMIT 1`,[req.userId])).rows[0];
-  res.json({match:rows[0]?renderMatch(rows[0]):null,
+  const hasProgress=(await pool.query(`SELECT to_regclass('maf_tournament_penalty_byes') AS byes,
+    to_regclass('maf_tournament_penalty_champions') AS champions`)).rows[0];
+  let bye=null,champion=null;
+  if(hasProgress.byes){
+    const br=(await pool.query(`SELECT b.tournament_id,b.round_no,t.title FROM maf_tournament_penalty_byes b
+      JOIN maf_tournaments t ON t.id=b.tournament_id WHERE b.user_id=$1 AND t.status='published'
+      AND t.cancelled_at IS NULL AND t.deleted_at IS NULL ORDER BY b.created_at DESC LIMIT 1`,[req.userId])).rows[0];
+    if(br)bye={tournamentId:Number(br.tournament_id),round:Number(br.round_no),title:br.title};
+  }
+  if(hasProgress.champions){
+    const ch=(await pool.query(`SELECT c.tournament_id,t.title FROM maf_tournament_penalty_champions c
+      JOIN maf_tournaments t ON t.id=c.tournament_id WHERE c.user_id=$1 ORDER BY c.completed_at DESC LIMIT 1`,[req.userId])).rows[0];
+    if(ch)champion={tournamentId:Number(ch.tournament_id),title:ch.title};
+  }
+  const latest=rows[0];
+  // Un joueur exempt n'affiche pas son ancien duel termine comme son salon actif.
+  const match=bye&&(!latest|| (Number(latest.tournament_id)===bye.tournamentId &&
+    Number(latest.round_no)<bye.round)) ? null : latest;
+  res.json({match:match?renderMatch(match):null,bye,champion,
     refunded:lastRefund?{tournamentId:Number(lastRefund.tournament_id),title:lastRefund.title,
       amount:Number(lastRefund.amount),at:lastRefund.created_at}:null,serverNow:Date.now()});
 }));
@@ -162,6 +180,19 @@ tournamentPenaltyDrawRouter.get('/penalty/bracket/:id',route(async(req,res)=>{
     FROM maf_tournament_penalty_matches m JOIN maf_tournaments t ON t.id=m.tournament_id
     JOIN maf_users uh ON uh.id=m.host_id JOIN maf_users ug ON ug.id=m.guest_id
     LEFT JOIN maf_users uw ON uw.id=m.winner_id WHERE m.tournament_id=$1 ORDER BY m.round_no,m.match_no`,[id]);
+  const available=(await pool.query(`SELECT to_regclass('maf_tournament_penalty_byes') AS byes,
+    to_regclass('maf_tournament_penalty_champions') AS champions`)).rows[0];
+  let byes=[],champion=null;
+  if(available.byes){
+    const a=await pool.query(`SELECT b.round_no,u.pseudo AS name FROM maf_tournament_penalty_byes b
+      JOIN maf_users u ON u.id=b.user_id WHERE b.tournament_id=$1 ORDER BY b.round_no`,[id]);
+    byes=a.rows.map(b=>({round:Number(b.round_no),name:b.name}));
+  }
+  if(available.champions){
+    const a=(await pool.query(`SELECT u.pseudo AS name,ch.completed_at FROM maf_tournament_penalty_champions ch
+      JOIN maf_users u ON u.id=ch.user_id WHERE ch.tournament_id=$1`,[id])).rows[0];
+    if(a)champion={name:a.name,at:a.completed_at};
+  }
   res.json({tournamentId:id,reference:tournamentReference(id),started:true,
-    participants:Number(draw.eligible_count),matches:rows.map(renderMatch),serverNow:Date.now()});
+    participants:Number(draw.eligible_count),matches:rows.map(renderMatch),byes,champion,serverNow:Date.now()});
 }));

@@ -1,0 +1,20 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {buildNextPenaltyRound,penaltyAbsenceDecision} from './penaltyTournamentProgressRules.js';
+for (let n=1;n<=32;n++) test(`progression ${n} qualifies sans doublon`,()=>{
+  const out=buildNextPenaltyRound(Array.from({length:n},(_,i)=>i+1),max=>max-1);
+  const selected=out.pairs.flatMap(p=>[p.hostId,p.guestId]).concat(out.bye?[out.bye]:[]);
+  assert.equal(selected.length,n); assert.equal(new Set(selected).size,n);
+  assert.equal(out.pairs.length,Math.floor(n/2));assert.equal(out.bye!==null,n%2===1);
+  assert.equal(out.champion,n===1?1:null);
+});
+test('qualifies dupliques bloques',()=>assert.throws(()=>buildNextPenaltyRound([1,1])));
+test('tirage invalide bloque',()=>assert.throws(()=>buildNextPenaltyRound([1,2],()=>10)));
+const base={status:'waiting',scheduled_at:new Date(0).toISOString(),host_seen_at:null,guest_seen_at:null};
+test('5 minutes initiales protegees',()=>assert.equal(penaltyAbsenceDecision({...base,host_seen_at:new Date(299000).toISOString()},299000),null));
+test('absence initiale : un joueur present gagne',()=>assert.deepEqual(penaltyAbsenceDecision({...base,host_seen_at:new Date(300000).toISOString()},300000),{winner:'host',reason:'absence_initiale'}));
+test('deux joueurs absents : aucun vainqueur',()=>assert.deepEqual(penaltyAbsenceDecision(base,300000),{winner:null,reason:'deux_absents'}));
+test('deconnexion 2min : joueur present avance',()=>assert.deepEqual(penaltyAbsenceDecision({ ...base,status:'playing',playing_at:new Date(200000).toISOString(),host_seen_at:new Date(200000).toISOString(),guest_seen_at:new Date(320000).toISOString()},320000),{winner:'guest',reason:'reconnexion_expiree'}));
+test('reconnexion dans les 2 minutes',()=>assert.equal(penaltyAbsenceDecision({...base,status:'playing',playing_at:new Date(200000).toISOString(),host_seen_at:new Date(201000).toISOString(),guest_seen_at:new Date(319000).toISOString()},319000),null));
+test('deux joueurs deconnectes : pas de champion artificiel',()=>assert.deepEqual(penaltyAbsenceDecision({...base,status:'playing',playing_at:new Date(200000).toISOString(),host_seen_at:new Date(201000).toISOString(),guest_seen_at:new Date(201000).toISOString()},330000),{winner:null,reason:'deux_deconnectes'}));
+test('aucune elimination avant le debut du match',()=>assert.equal(penaltyAbsenceDecision({...base,scheduled_at:new Date(800000).toISOString()},300000),null));
