@@ -15,7 +15,7 @@ import { blankMatch, roleFor, recordChoice } from './penaltyEngine.js';
 import {tankInitial,tankFire,tankForfeit,tankOfferDraw,tankRespondDraw,tankCancelDraw,tankView,TANK_TURN_MS} from './tankEngine.js';
 // MAF_TANK_BACKEND_V1
 import { blankCheckers, applyMove, offerDraw, respondDraw, cancelDraw, forfeitCheckers, checkersView, MOVE_LIMIT_MS } from './checkersEngine.js';
-import {initialLudo, rollLudo, moveLudo, forfeitLudo, LUDO_TURN_MS} from './ludoEngine.js'; // MAF_LUDO_STAGE4
+import {initialLudo, rollLudo, moveLudo, forfeitLudo, autoTurnLudo, LUDO_TURN_MS} from './ludoEngine.js'; // MAF_LUDO_STAGE4
 
 export const roomsRouter = Router();
 const allowedShots = new Set([3, 5, 10]);
@@ -230,6 +230,15 @@ async function resolveDepartures(client) {
       due.sort((a,b) => a.deadline - b.deadline || a.loser.localeCompare(b.loser));
       if (!due.length || !room.match_state) continue;
       const { loser, reason } = due[0];
+      if (room.game === 'ludo' && reason === 'move_timeout') {
+        // Le minuteur remplace le joueur par un bot pour un SEUL tour,
+        // sans declaration de forfait ni mouvement financier intempestif.
+        const state = autoTurnLudo(room.match_state);
+        await client.query('UPDATE maf_rooms SET status=$3, match_state=$2::jsonb,updated_at=now() WHERE id=$1',
+          [room.id, JSON.stringify(state), state.finished ? 'finished' : 'playing']);
+        if (state.finished) await settleRoom(client, room, state.winner);
+        continue;
+      }
       const state = room.game === 'ludo' ? forfeitLudo(room.match_state,loser,reason)
         : room.game === 'tank' ? tankForfeit(room.match_state, loser, reason)
         : room.game === 'checkers' ? forfeitCheckers(room.match_state, loser, reason)

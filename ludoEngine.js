@@ -77,3 +77,40 @@ export function forfeitLudo(before,side,reason='abandon') {
   next.lastAction=reason==='move_timeout'?'Temps de jeu écoulé':'Abandon de la partie';
   return next;
 }
+
+// Tour automatique en cas de depassement du minuteur : PAS de forfait.
+// Le serveur conserve la generation du de et choisit uniformement parmi les coups autorises.
+export function autoTurnLudo(before, rollRandom=() => crypto.randomInt(1,7), pickRandom=(length) => crypto.randomInt(0,length), now=Date.now()) {
+  if (before?.type !== 'ludo' || before.finished) bad('Partie terminee.');
+  const side = before.toMove;
+  let state = before;
+  let rolled = state.roll;
+  if (rolled == null) {
+    state = rollLudo(state, side, rollRandom, now);
+    // Meme si aucun pion ne peut jouer, le resultat du de est connu cote serveur.
+    const match = /a obtenu ([1-6])/.exec(state.lastAction);
+    rolled = match ? Number(match[1]) : null;
+  }
+  let movedIndex = null;
+  if (state.roll != null) {
+    const candidates = validMoves(state);
+    if (candidates.length > 0) {
+      const selection = pickRandom(candidates.length);
+      if (!Number.isInteger(selection) || selection < 0 || selection >= candidates.length) bad('Choix automatique invalide.');
+      movedIndex = candidates[selection];
+      state = moveLudo(state, side, movedIndex, now);
+    } else {
+      // Securite en cas d'etat historique incoherent.
+      state = structuredClone(state);
+      state.roll = null;
+      state.valid = [];
+      state.toMove = side === 'host' ? 'guest' : 'host';
+      state.lastMoveAt = now;
+      state.version++;
+    }
+  }
+  const suffix = movedIndex == null ? 'aucun pion possible' : `pion ${movedIndex+1} avance`;
+  state.lastAction = `${side} a obtenu ${rolled} · bot automatique (temps ecoule) : ${suffix}`;
+  if (state.finished) state.lastAction += ` · victoire de ${side}`;
+  return state;
+}
