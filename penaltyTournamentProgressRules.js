@@ -27,8 +27,12 @@ export function penaltyAbsenceDecision(match, now = Date.now()) {
   const hostHere=active(host),guestHere=active(guest);
   if(match.status!=='playing') {
     if(now-scheduled<300000)return null; // 5 min pour rejoindre.
+    const joined=(at,seen)=>d(at)!==null||d(seen)!==null; // a rejoint le salon au moins une fois
+    const hostJoined=joined(match.host_joined_at,host),guestJoined=joined(match.guest_joined_at,guest);
+    if(hostJoined!==guestJoined)return {winner:hostJoined?'host':'guest',reason:'absence_initiale'}; // un seul est venu : il gagne meme si son ecran s'est verrouille
     if(hostHere!==guestHere)return {winner:hostHere?'host':'guest',reason:'absence_initiale'};
-    if(!hostHere&&!guestHere&&now-scheduled>=600000)return {winner:null,reason:'deux_absents'}; // 10 min si les deux sont absents
+    if(!hostJoined&&!guestJoined&&now-scheduled>=600000)return {winner:null,reason:'deux_absents'}; // 10 min si personne n'est venu
+    if(!hostHere&&!guestHere&&now-scheduled>=600000)return {winner:null,reason:'jamais_ensemble'}; // venus chacun a leur tour sans se croiser : verification
     return null;
   }
   const idle=penaltyIdleDecision(match,now); // connecte mais ne joue pas : disqualifie
