@@ -24,7 +24,7 @@ test('le chrono repart apres chaque tir',()=>{
 });
 test('deux inactifs : pas de decision ici (cas traite a part)',()=>{
   const s=beginPenaltyDuel(5);
-  assert.equal(penaltyIdleDecision(mk(s),s.turnStartedAt+PENALTY_IDLE_MS*3),null);
+  assert.equal(penaltyIdleDecision(mk(s),s.turnStartedAt+PENALTY_IDLE_MS*3).reason,'deux_inactifs');
 });
 test('connecte (presence fraiche) mais inactif : disqualifie quand meme',()=>{
   const s=beginPenaltyDuel(5);choosePenaltyDuel(s,'guest','left');

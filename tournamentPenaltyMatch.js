@@ -93,13 +93,15 @@ tournamentPenaltyMatchRouter.get('/penalty/matches/:id',requireSession,route(asy
 tournamentPenaltyMatchRouter.post('/penalty/matches/:id/presence',requireSession,route(async(req,res)=>mutate(req,res,r=>{
   if(r.status==='finished'||r.status==='attention')return false;
   const now=Date.now();
+  const oppSeen=side(r,req.userId)==='host'?r.guest_seen_at:r.host_seen_at;
+  const oppHere=!!oppSeen&&now-Date.parse(oppSeen)<=45000;
   if(Date.parse(r.scheduled_at)>now+300000)throw fail(409,'Salon pas encore ouvert.');
-  if(['scheduled','waiting'].includes(r.status) && now-Date.parse(r.scheduled_at)>=300000)
+  if(['scheduled','waiting'].includes(r.status) && now-Date.parse(r.scheduled_at)>=(oppHere?300000:600000))
     throw fail(409,'Delai d arrivee depasse : resultat en verification.');
   if(r.status==='playing'){
     const seen=side(r,req.userId)==='host'?r.host_seen_at:r.guest_seen_at;
     const since=seen?Date.parse(seen):(r.playing_at?Date.parse(r.playing_at):now);
-    if(now-since>=120000)throw fail(409,'Delai de reconnexion depasse : resultat en verification.');
+    if(now-since>=120000&&oppHere)throw fail(409,'Delai de reconnexion depasse : resultat en verification.');
   }
   const viewer=side(r,req.userId),field=viewer+'_seen_at',joined=viewer+'_joined_at';
   r[field]=new Date(now);

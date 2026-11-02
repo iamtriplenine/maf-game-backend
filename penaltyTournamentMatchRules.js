@@ -32,7 +32,7 @@ export function visiblePenaltyDuel(state,viewer,now=Date.now()){
     turn:state.turn,totalPerPlayer:state.totalPerPlayer,regularPerPlayer:state.regularPerPlayer,
     overtime:state.overtime,scores:state.scores,history:state.history,winner:state.winner,
     finished:state.finished,forfeit:state.forfeit||null,viewer,role,
-    turnDeadline:Number.isFinite(state.turnStartedAt)?state.turnStartedAt+PENALTY_IDLE_MS:null,
+    turnDeadline:Number.isFinite(state.turnStartedAt)?state.turnStartedAt+PENALTY_IDLE_MS:null,doubleForfeit:state.doubleForfeit===true,
     shooter:state.turn%2===0?'host':'guest',myChoice:state.pending[role],
     otherReady:!!state.pending[role==='shooter'?'keeper':'shooter'],serverNow:now,
   };

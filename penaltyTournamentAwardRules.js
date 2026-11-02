@@ -5,7 +5,7 @@
 // sont redistribuees proportionnellement aux autres vainqueurs.
 const positive=x=>Number.isSafeInteger(x)&&x>0;
 const unique=ids=>new Set(ids).size===ids.length;
-export function penaltyAwardBudget(ids, fee, champion, runnerUp, semiLosers=[]) {
+export function penaltyAwardBudget(ids, fee, champion, runnerUp, semiLosers=[], allowNoSemi=false) {
   if(!Array.isArray(ids)||ids.length<2||ids.length>32||ids.length%2||
     ids.some(x=>!positive(x))||!unique(ids)||![200,500].includes(fee))
     throw new Error('Inscriptions ou mises invalides.');
@@ -13,7 +13,7 @@ export function penaltyAwardBudget(ids, fee, champion, runnerUp, semiLosers=[]) 
     !ids.includes(champion)||!ids.includes(runnerUp) || !Array.isArray(semiLosers) ||
     semiLosers.length>2||semiLosers.some(x=>!positive(x)||!ids.includes(x))||
     !unique([champion,runnerUp,...semiLosers]))throw new Error('Classement incoherent.');
-  if(ids.length>=4 && ![1,2].includes(semiLosers.length))throw new Error('Demi-finalistes attendus.');
+  if(ids.length>=4 && !(allowNoSemi&&semiLosers.length===0) && ![1,2].includes(semiLosers.length))throw new Error('Demi-finalistes attendus.');
   if(ids.length===2 && semiLosers.length!==0)throw new Error('Aucun demi-finaliste attendu.');
   const pot=ids.length*fee,organizerFranc=Math.floor(pot/8),prizes=pot-organizerFranc;
   const positions=[{userId:champion,place:1,weight:8,role:'champion'},
@@ -43,7 +43,7 @@ export function certifyPenaltyBracket(entries,draw,matches,byes,championRow) {
   if(!Array.isArray(matches)||!Array.isArray(byes)||!championRow)
     throw new Error('Tableau incomplet.');
   const finalChampion=Number(championRow.user_id);
-  let entrants=ids.slice(),round=1,roundMatches=[],lastMatch=null,prevSemi=[];
+  let entrants=ids.slice(),round=1,roundMatches=[],lastMatch=null,prevSemi=[],hadDouble=false;
   const rounds=new Set(matches.map(x=>Number(x.round_no)));
   if(rounds.size<1||Math.min(...rounds)!==1||rounds.size>32)
     throw new Error('Tours invalides.');
@@ -58,6 +58,7 @@ export function certifyPenaltyBracket(entries,draw,matches,byes,championRow) {
       throw new Error('Participants manquants ou en double.');
     const winners=[];
     for(const match of roundMatches){
+      if(match.status==='finished'&&!match.winner_id&&match.match_state?.finished&&match.match_state.doubleForfeit===true){hadDouble=true;continue;} // deux disqualifies
       const winner=Number(match.winner_id),host=Number(match.host_id),guest=Number(match.guest_id);
       if(match.status!=='finished'||!match.match_state?.finished||
         !['host','guest'].includes(match.match_state.winner)||
@@ -69,7 +70,7 @@ export function certifyPenaltyBracket(entries,draw,matches,byes,championRow) {
       throw new Error('Nombre de matchs initial incoherent.');
     if(entrants.length<=4 && entrants.length>=3) {
       // Il n'existe pas de classement fictif : seuls les vrais perdants des demies comptent.
-      prevSemi=roundMatches.map(m=>Number(m.winner_id)===Number(m.host_id)?Number(m.guest_id):Number(m.host_id));
+      prevSemi=roundMatches.filter(m=>m.winner_id).map(m=>Number(m.winner_id)===Number(m.host_id)?Number(m.guest_id):Number(m.host_id));
     }
     if(entrants.length===2){
       if(roundMatches.length!==1||exempt.length!==0)throw new Error('Finale invalide.');
@@ -84,8 +85,8 @@ export function certifyPenaltyBracket(entries,draw,matches,byes,championRow) {
     throw new Error('Champion non conforme a la finale.');
   const runner=Number(lastMatch.host_id)===finalChampion?Number(lastMatch.guest_id):Number(lastMatch.host_id);
   // Pour 4+ joueurs, les deux demi-finalistes doivent preceder immediatement la finale.
-  if(ids.length>=4 && ![1,2].includes(prevSemi.length))throw new Error('Classement des demi-finales absent.');
-  const budget=penaltyAwardBudget(ids,fee,finalChampion,runner,prevSemi);
+  if(ids.length>=4 && !(hadDouble&&prevSemi.length===0) && ![1,2].includes(prevSemi.length))throw new Error('Classement des demi-finales absent.');
+  const budget=penaltyAwardBudget(ids,fee,finalChampion,runner,prevSemi,hadDouble);
   return {...budget,championId:finalChampion,runnerId:runner,
     finalMatchId:String(lastMatch.id),rounds:round-1,eligibleIds:ids};
 }

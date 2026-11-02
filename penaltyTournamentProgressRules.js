@@ -28,7 +28,8 @@ export function penaltyAbsenceDecision(match, now = Date.now()) {
   if(match.status!=='playing') {
     if(now-scheduled<300000)return null; // 5 min pour rejoindre.
     if(hostHere!==guestHere)return {winner:hostHere?'host':'guest',reason:'absence_initiale'};
-    return {winner:null,reason:'deux_absents'};
+    if(!hostHere&&!guestHere&&now-scheduled>=600000)return {winner:null,reason:'deux_absents'}; // 10 min si les deux sont absents
+    return null;
   }
   const idle=penaltyIdleDecision(match,now); // connecte mais ne joue pas : disqualifie
   if(idle)return idle;
@@ -37,7 +38,7 @@ export function penaltyAbsenceDecision(match, now = Date.now()) {
   if(now-hostRef<120000 && now-guestRef<120000)return null;
   if(hostHere!==guestHere && now-(hostHere?guestRef:hostRef)>=120000)
     return {winner:hostHere?'host':'guest',reason:'reconnexion_expiree'};
-  if(!hostHere&&!guestHere && now-hostRef>=120000 && now-guestRef>=120000)
+  if(!hostHere&&!guestHere && now-hostRef>=600000 && now-guestRef>=600000)
     return {winner:null,reason:'deux_deconnectes'};
   return null;
 }
@@ -53,6 +54,7 @@ export function penaltyIdleDecision(match, now = Date.now()) {
   const idle = [];
   if (s.pending.shooter === null) idle.push(shooter);
   if (s.pending.keeper === null) idle.push(keeper);
-  if (idle.length !== 1) return null; // les deux inactifs : traite a part
+  if (idle.length === 2) return now - s.turnStartedAt >= 600000 ? {winner: null, reason: 'deux_inactifs'} : null; // 10 min : les deux disqualifies
+  if (idle.length !== 1) return null;
   return {winner: idle[0] === 'host' ? 'guest' : 'host', reason: 'inactivite_tir'};
 }

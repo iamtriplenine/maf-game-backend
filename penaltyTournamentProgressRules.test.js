@@ -13,8 +13,9 @@ test('tirage invalide bloque',()=>assert.throws(()=>buildNextPenaltyRound([1,2],
 const base={status:'waiting',scheduled_at:new Date(0).toISOString(),host_seen_at:null,guest_seen_at:null};
 test('5 minutes initiales protegees',()=>assert.equal(penaltyAbsenceDecision({...base,host_seen_at:new Date(299000).toISOString()},299000),null));
 test('absence initiale : un joueur present gagne',()=>assert.deepEqual(penaltyAbsenceDecision({...base,host_seen_at:new Date(300000).toISOString()},300000),{winner:'host',reason:'absence_initiale'}));
-test('deux joueurs absents : aucun vainqueur',()=>assert.deepEqual(penaltyAbsenceDecision(base,300000),{winner:null,reason:'deux_absents'}));
+test('deux joueurs absents : on attend 10 min',()=>{assert.equal(penaltyAbsenceDecision(base,300000),null);assert.equal(penaltyAbsenceDecision(base,599000),null);});
+test('deux joueurs absents 10 min : les deux disqualifies',()=>assert.deepEqual(penaltyAbsenceDecision(base,600000),{winner:null,reason:'deux_absents'}));
 test('deconnexion 2min : joueur present avance',()=>assert.deepEqual(penaltyAbsenceDecision({ ...base,status:'playing',playing_at:new Date(200000).toISOString(),host_seen_at:new Date(200000).toISOString(),guest_seen_at:new Date(320000).toISOString()},320000),{winner:'guest',reason:'reconnexion_expiree'}));
 test('reconnexion dans les 2 minutes',()=>assert.equal(penaltyAbsenceDecision({...base,status:'playing',playing_at:new Date(200000).toISOString(),host_seen_at:new Date(201000).toISOString(),guest_seen_at:new Date(319000).toISOString()},319000),null));
-test('deux joueurs deconnectes : pas de champion artificiel',()=>assert.deepEqual(penaltyAbsenceDecision({...base,status:'playing',playing_at:new Date(200000).toISOString(),host_seen_at:new Date(201000).toISOString(),guest_seen_at:new Date(201000).toISOString()},330000),{winner:null,reason:'deux_deconnectes'}));
+test('deux joueurs deconnectes : pas de champion artificiel',()=>assert.deepEqual(penaltyAbsenceDecision({...base,status:'playing',playing_at:new Date(200000).toISOString(),host_seen_at:new Date(201000).toISOString(),guest_seen_at:new Date(201000).toISOString()},201000+600000),{winner:null,reason:'deux_deconnectes'}));
 test('aucune elimination avant le debut du match',()=>assert.equal(penaltyAbsenceDecision({...base,scheduled_at:new Date(800000).toISOString()},300000),null));

@@ -51,12 +51,24 @@ const audit=async(c,event,details)=>c.query(`INSERT INTO maf_wallet_audit(actor,
   VALUES('system:tournament',$1,$2::jsonb)`,[event,JSON.stringify(details)]);
 // Exige une victoire certifiee, jamais une valeur envoye par un client.
 function certified(m){
+  if(m.status==='finished'&&!m.winner_id&&m.match_state?.doubleForfeit===true)return true; // deux disqualifies
   if(m.status!=='finished'||!m.winner_id||!m.match_state?.finished ||
      !['host','guest'].includes(m.match_state.winner))return false;
   return Number(m.winner_id)===Number(m.match_state.winner==='host'?m.host_id:m.guest_id);
 }
 async function updateTimeout(c,m,decision){
   if(!decision)return false;
+  if(!decision.winner&&['deux_absents','deux_deconnectes','deux_inactifs'].includes(decision.reason)){
+    // Deux absents : les deux sont disqualifies sans remboursement, le tournoi continue.
+    const state=m.match_state||beginPenaltyDuel(Number(m.penalty_shots));
+    state.finished=true;state.winner=null;state.doubleForfeit=true;state.pending={shooter:null,keeper:null};
+    await c.query(`UPDATE maf_tournament_penalty_matches SET status='finished',winner_id=NULL,
+      match_state=$2::jsonb,attention_reason=$3,revision=revision+1 WHERE id=$1 AND status IN ('scheduled','waiting','playing')`,
+      [m.id,JSON.stringify(state),decision.reason]);
+    await audit(c,'tournament_penalty_double_forfeit',{tournament_id:m.tournament_id,match_id:String(m.id),
+      host_id:m.host_id,guest_id:m.guest_id,reason:decision.reason});
+    return true;
+  }
   if(!decision.winner){
     await c.query(`UPDATE maf_tournament_penalty_matches SET status='attention',attention_reason=$2,
       revision=revision+1 WHERE id=$1 AND status IN ('scheduled','waiting','playing')`,[m.id,decision.reason]);
@@ -93,13 +105,17 @@ export async function progressPenaltyTournament(tournamentId){
       if(action){await updateTimeout(c,m,action);changed=true;
         if(action.winner){m.status='finished';m.winner_id=action.winner==='host'?m.host_id:m.guest_id;
           m.match_state={...(m.match_state||beginPenaltyDuel(Number(m.penalty_shots))),finished:true,winner:action.winner};
+        }else if(['deux_absents','deux_deconnectes','deux_inactifs'].includes(action.reason)){
+          m.status='finished';m.winner_id=null;
+          m.match_state={...(m.match_state||beginPenaltyDuel(Number(m.penalty_shots))),finished:true,winner:null,doubleForfeit:true};
         }else m.status='attention';}
     }
     if(current.some(m=>!certified(m))){await c.query('COMMIT');return {changed,round,waiting:true};}
     const champion=(await c.query(`SELECT user_id FROM maf_tournament_penalty_champions WHERE tournament_id=$1`,[id])).rows[0];
     if(champion){await c.query('COMMIT');return {changed,round,complete:true};}
     const exemptions=(await c.query(`SELECT user_id FROM maf_tournament_penalty_byes WHERE tournament_id=$1 AND round_no=$2`,[id,round])).rows;
-    const qualifiers=current.map(m=>Number(m.winner_id)).concat(exemptions.map(x=>Number(x.user_id)));
+    const qualifiers=current.filter(m=>m.winner_id).map(m=>Number(m.winner_id)).concat(exemptions.map(x=>Number(x.user_id)));
+    if(!qualifiers.length){await c.query('COMMIT');return {changed,round,noQualifier:true};} // tous disqualifies : a traiter par le proprietaire
     const plan=buildNextPenaltyRound(qualifiers);
     if(plan.champion){
       await c.query(`INSERT INTO maf_tournament_penalty_champions(tournament_id,user_id) VALUES($1,$2)
