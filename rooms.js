@@ -15,6 +15,7 @@ import { blankMatch, roleFor, recordChoice } from './penaltyEngine.js';
 import {tankInitial,tankFire,tankForfeit,tankOfferDraw,tankRespondDraw,tankCancelDraw,tankView,TANK_TURN_MS} from './tankEngine.js';
 // MAF_TANK_BACKEND_V1
 import { blankCheckers, applyMove, offerDraw, respondDraw, cancelDraw, forfeitCheckers, checkersView, MOVE_LIMIT_MS } from './checkersEngine.js';
+import {initialLudo, rollLudo, moveLudo, forfeitLudo, LUDO_TURN_MS} from './ludoEngine.js'; // MAF_LUDO_STAGE4
 
 export const roomsRouter = Router();
 const allowedShots = new Set([3, 5, 10]);
@@ -76,11 +77,11 @@ export function ensureRooms() {
         ALTER TABLE maf_rooms ADD COLUMN IF NOT EXISTS funds_alert jsonb;
         ALTER TABLE maf_rooms DROP CONSTRAINT IF EXISTS maf_rooms_game_check;
         ALTER TABLE maf_rooms ADD CONSTRAINT maf_rooms_game_check
-          CHECK(game IN ('penalty', 'checkers', 'tank', 'dice', 'tankrun'));
+          CHECK(game IN ('penalty', 'checkers', 'tank', 'dice', 'tankrun', 'ludo'));
         ALTER TABLE maf_rooms ALTER COLUMN shots DROP NOT NULL;
         ALTER TABLE maf_rooms DROP CONSTRAINT IF EXISTS maf_rooms_shots_check;
         ALTER TABLE maf_rooms ADD CONSTRAINT maf_rooms_shots_check
-          CHECK((game='penalty' AND shots IN (3,5,10)) OR (game='dice' AND shots IN (1,3,5,10)) OR (game IN ('checkers','tank','tankrun') AND shots IS NULL));
+          CHECK((game='penalty' AND shots IN (3,5,10)) OR (game='dice' AND shots IN (1,3,5,10)) OR (game IN ('checkers','tank','tankrun','ludo') AND shots IS NULL));
         ALTER TABLE maf_rooms DROP CONSTRAINT IF EXISTS maf_rooms_dice_count_check;
         ALTER TABLE maf_rooms ADD CONSTRAINT maf_rooms_dice_count_check CHECK ((game='dice' AND dice_count IN (1,2)) OR (game<>'dice' AND dice_count IS NULL));
         ALTER TABLE maf_rooms DROP CONSTRAINT IF EXISTS maf_rooms_dice_mode_check;
@@ -213,7 +214,7 @@ async function transaction(fn) {
 // Server-owned deadlines survive reloads and restarts. All transitions share the room lock.
 async function resolveDepartures(client) {
   const { rows } = await client.query(`SELECT * FROM maf_rooms
-    WHERE (status='playing' AND (departures <> '{}'::jsonb OR game IN ('checkers','tank')))
+    WHERE (status='playing' AND (departures <> '{}'::jsonb OR game IN ('checkers','tank','ludo')))
        OR (status='finished' AND escrow > 0 AND settled_at IS NULL)
     ORDER BY id FOR UPDATE`);
   for (const room of rows) {
@@ -221,15 +222,16 @@ async function resolveDepartures(client) {
       const due = Object.entries(room.departures || {})
         .filter(([key, deadline]) => ['host','guest'].includes(key) && Number.isFinite(deadline) && deadline <= Date.now())
         .map(([loser, deadline]) => ({ loser, deadline, reason: 'return_timeout' }));
-      if (['checkers','tank'].includes(room.game) && room.match_state?.lastMoveAt != null) {
-        const deadline = Number(room.match_state.lastMoveAt) + (room.game === 'tank' ? TANK_TURN_MS : MOVE_LIMIT_MS);
+      if (['checkers','tank','ludo'].includes(room.game) && room.match_state?.lastMoveAt != null) {
+        const deadline = Number(room.match_state.lastMoveAt) + (room.game === 'tank' ? TANK_TURN_MS : room.game === 'ludo' ? LUDO_TURN_MS : MOVE_LIMIT_MS);
         if (Number.isFinite(deadline) && deadline <= Date.now())
           due.push({ loser: room.match_state.toMove, deadline, reason: 'move_timeout' });
       }
       due.sort((a,b) => a.deadline - b.deadline || a.loser.localeCompare(b.loser));
       if (!due.length || !room.match_state) continue;
       const { loser, reason } = due[0];
-      const state = room.game === 'tank' ? tankForfeit(room.match_state, loser, reason)
+      const state = room.game === 'ludo' ? forfeitLudo(room.match_state,loser,reason)
+        : room.game === 'tank' ? tankForfeit(room.match_state, loser, reason)
         : room.game === 'checkers' ? forfeitCheckers(room.match_state, loser, reason)
         : { ...room.match_state, finished:true, winner:loser === 'host' ? 'guest' : 'host',
           forfeit:loser, forfeitReason:reason, draw:false, pending:room.game === 'dice' ? {host:null,guest:null} : {shooter:null,keeper:null} };
@@ -402,9 +404,9 @@ roomsRouter.get('/:id', respond(async (req, res) => {
 
 roomsRouter.post('/', requireSession, respond(async (req, res) => {
   const { game, shots, stake, diceCount, diceMode } = req.body || {};
-  if (!['penalty', 'checkers', 'tank', 'dice', 'tankrun'].includes(game)) throw fail(400, 'Jeu indisponible.');
+  if (!['penalty', 'checkers', 'tank', 'dice', 'tankrun', 'ludo'].includes(game)) throw fail(400, 'Jeu indisponible.');
   if (game === 'penalty' && !allowedShots.has(shots)) throw fail(400, 'Choisis 3, 5 ou 10 tirs par joueur.');
-  if (['checkers','tank','tankrun'].includes(game) && shots != null) throw fail(400, 'Ce jeu ne demande pas de nombre de tirs.');
+  if (['checkers','tank','tankrun','ludo'].includes(game) && shots != null) throw fail(400, 'Ce jeu ne demande pas de nombre de tirs.');
   if (game === 'dice') {
     try { validateDiceSettings(diceCount, shots, diceMode); }
     catch (err) { throw fail(400, err.message); }
@@ -539,6 +541,9 @@ async function visibleMatch(r, uid) {
     (viewer === 'host' ? r.host_pseudo : r.guest_pseudo) === '999';
   const winAvailable = r.status === 'playing' && ['penalty','tank','dice'].includes(r.game) &&
     (ownerWin || await winAccessForRoom(uid,r.game,r.id));
+  if (r.game === 'ludo') return {status:r.status, match:{...state,viewer,serverNow:Date.now(),
+    moveDeadline:state.lastMoveAt+LUDO_TURN_MS, opponentReturnDeadline:r.departures?.[other(viewer)]??null,
+    returnDeadline:r.departures?.[viewer]??null}};
   if (r.game === 'tankrun') return { status:r.status, match:{...state, viewer, serverNow:Date.now()} };
   if (r.game === 'dice') return { status:r.status, match:{ ...diceView(state, viewer),
     ...(winAvailable ? { winModeAvailable:true } : {}),
@@ -691,6 +696,34 @@ roomsRouter.post('/:id/match/tankrun/input',requireSession,respond(async(req,res
  res.json({ok:true});
 }));
 
+// MAF_LUDO_STAGE4 : actions server-authoritative, transactions et escrow existants.
+roomsRouter.post('/:id/match/ludo/roll',requireSession,respond(async(req,res)=>{
+  const result=await transaction(async(client)=>{
+    const r=await load(client,roomId(req.params.id));const viewer=side(r,req.userId);
+    if(!viewer||r.game!=='ludo'||r.status!=='playing'||!r.match_state)throw fail(409,'Duel Ludo indisponible.');
+    if(r.departures?.[viewer])throw fail(409,'Reviens dans le duel avant de jouer.');
+    let state;try{state=rollLudo(r.match_state,viewer);}catch(e){throw fail(409,e.message)}
+    await client.query('UPDATE maf_rooms SET match_state=$2::jsonb,updated_at=now() WHERE id=$1',[r.id,JSON.stringify(state)]);
+    return load(client,r.id);
+  });
+  res.json({room:shown(result,req.userId),...await visibleMatch(result,req.userId)});
+}));
+roomsRouter.post('/:id/match/ludo/move',requireSession,respond(async(req,res)=>{
+  const index=req.body?.index;
+  if(!Number.isInteger(index)||index<0||index>3)throw fail(400,'Pion invalide.');
+  const result=await transaction(async(client)=>{
+    const r=await load(client,roomId(req.params.id));const viewer=side(r,req.userId);
+    if(!viewer||r.game!=='ludo'||r.status!=='playing'||!r.match_state)throw fail(409,'Duel Ludo indisponible.');
+    if(r.departures?.[viewer])throw fail(409,'Reviens dans le duel avant de jouer.');
+    let state;try{state=moveLudo(r.match_state,viewer,index);}catch(e){throw fail(409,e.message)}
+    await client.query('UPDATE maf_rooms SET match_state=$2::jsonb,status=$3,updated_at=now() WHERE id=$1',
+      [r.id,JSON.stringify(state),state.finished?'finished':'playing']);
+    if(state.finished)await settleRoom(client,r,state.winner);
+    return load(client,r.id);
+  });
+  res.json({room:shown(result,req.userId),...await visibleMatch(result,req.userId)});
+}));
+
 roomsRouter.post('/:id/match/start', requireSession, respond(async (req, res) => {
   const room = await transaction(async (client) => {
     const r = await load(client, roomId(req.params.id));
@@ -706,7 +739,7 @@ roomsRouter.post('/:id/match/start', requireSession, respond(async (req, res) =>
         startedAt:Date.now(), finished:false, winner:null };
     }
     await client.query(`UPDATE maf_rooms SET status='playing', match_state=$2::jsonb,updated_at=now()
-      WHERE id=$1`, [r.id, JSON.stringify(r.game === 'tankrun' ? tankrunStart : r.game === 'tank' ? tankInitial(Number(r.id) * 9973, Date.now()) : r.game === 'checkers' ? { ...blankCheckers(), lastMoveAt: Date.now() } : r.game === 'dice' ? initialDice(r.dice_count, r.shots, r.dice_mode) : blankMatch(r.shots))]);
+      WHERE id=$1`, [r.id, JSON.stringify(r.game === 'tankrun' ? tankrunStart : r.game === 'tank' ? tankInitial(Number(r.id) * 9973, Date.now()) : r.game === 'checkers' ? { ...blankCheckers(), lastMoveAt: Date.now() } : r.game === 'ludo' ? initialLudo() : r.game === 'dice' ? initialDice(r.dice_count, r.shots, r.dice_mode) : blankMatch(r.shots))]);
     return load(client, r.id);
   });
   res.json({ room: shown(room, req.userId), ...await visibleMatch(room, req.userId) });
@@ -771,6 +804,7 @@ roomsRouter.post('/:id/match/forfeit', requireSession, respond(async (req, res) 
     if (r.game === 'tankrun') { state.finished=true; state.winner=other(viewer); state.forfeit=viewer; dropTankRunRuntime(r.id); }
     else if (r.game === 'tank') tankForfeit(state, viewer);
     else if (r.game === 'checkers') forfeitCheckers(state, viewer);
+    else if (r.game === 'ludo') Object.assign(state,forfeitLudo(state,viewer));
     else if (r.game === 'dice') { state.winner = other(viewer); state.draw = false; state.finished = true; state.forfeit = viewer; state.pending = {host:null,guest:null}; }
     else {
       state.winner = other(viewer);
