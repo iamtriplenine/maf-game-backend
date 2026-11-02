@@ -62,6 +62,20 @@ export function ensureTournaments() {
         ),
         ADD CONSTRAINT maf_tournaments_penalty_shots_check CHECK (penalty_shots IN (3,5,10))`);
       await ensureReservationTables(client);
+      // Mise a niveau unique des annonces Tir-au-but deja publiees sous l'ancienne
+      // regle (inscriptions fermees par defaut). Ne touche jamais a Monopoly.
+      // Ne rejoue pas cette migration apres une fermeture manuelle ulterieure.
+      await client.query(`CREATE TABLE IF NOT EXISTS maf_tournament_migrations (
+        migration_key text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now()
+      )`);
+      const openPenaltyMigration = await client.query(`INSERT INTO maf_tournament_migrations (migration_key)
+        VALUES ('penalty_registration_auto_open_v1') ON CONFLICT DO NOTHING RETURNING migration_key`);
+      if (openPenaltyMigration.rowCount) {
+        await client.query(`UPDATE maf_tournaments SET registration_open=true, revision=revision+1, updated_at=now()
+          WHERE game='penalty' AND status='published' AND starts_at>now() AND registration_open=false
+            AND NOT EXISTS (SELECT 1 FROM maf_tournament_entries e
+                            WHERE e.tournament_id=maf_tournaments.id)`);
+      }
       await client.query('COMMIT');
     } catch (e) { await client.query('ROLLBACK'); throw e; }
     finally { client.release(); }
@@ -158,7 +172,7 @@ tournamentsRouter.post('/owner', requireSession, run(async (req,res) => {
     (title,description,starts_at,final_at,status,participant_skin_id,winner_skin_id,
      game,capacity,entry_fee,penalty_shots,creator_id,registration_open)
     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
-      (CASE WHEN $8='monopoly' THEN $5='published' ELSE false END)) RETURNING *`, [...values, req.userId]);
+      ($5='published')) RETURNING *`, [...values, req.userId]);
   res.status(201).json({ tournament: view(rows[0]), serverNow: Date.now() });
 }));
 tournamentsRouter.put('/owner/:id', requireSession, run(async (req,res) => {
@@ -181,7 +195,7 @@ tournamentsRouter.put('/owner/:id', requireSession, run(async (req,res) => {
       capacity=$9,entry_fee=$10,penalty_shots=$11,registration_open=CASE
         WHEN $5 <> 'published' THEN false
         WHEN status <> 'published' AND $5='published' AND $8='monopoly' THEN true
-        WHEN status <> 'published' AND $5='published' AND $8='penalty' THEN false
+        WHEN status <> 'published' AND $5='published' AND $8='penalty' THEN true
         ELSE registration_open END,revision=revision+1,updated_at=now() WHERE id=$12 RETURNING *`, [...values,id]);
     await client.query('COMMIT');
     res.json({ tournament: view(updated.rows[0]), serverNow: Date.now() });
