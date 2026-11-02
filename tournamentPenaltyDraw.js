@@ -94,10 +94,13 @@ export async function startPenaltyTournament(id){
     }
     await c.query(`INSERT INTO maf_tournament_penalty_draws(tournament_id,eligible_count,initial_match_count,refunded_user_id)
       VALUES($1,$2,$3,$4)`,[id,draw.plan.players,draw.pairs.length,draw.refundedUserId]);
+    // Si le service programme le tirage en retard, laisser cinq minutes pleines
+    // a partir de la creation effective des salons (jamais avant l'heure prevue).
+    const matchStartAt = new Date(Math.max(Date.now(), Date.parse(t.starts_at)));
     for(const p of draw.pairs){
       await c.query(`INSERT INTO maf_tournament_penalty_matches
         (tournament_id,round_no,match_no,host_id,guest_id,scheduled_at)
-        VALUES($1,1,$2,$3,$4,$5)`,[id,p.matchNo,p.host.userId,p.guest.userId,t.starts_at]);
+        VALUES($1,1,$2,$3,$4,$5)`,[id,p.matchNo,p.host.userId,p.guest.userId,matchStartAt]);
     }
     await c.query(`UPDATE maf_tournaments SET registration_open=false,revision=revision+1,updated_at=now() WHERE id=$1`,[id]);
     await c.query(`INSERT INTO maf_wallet_audit(actor,event,details)
