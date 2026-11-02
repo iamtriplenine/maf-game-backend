@@ -7,7 +7,7 @@ import {beginPenaltyDuel,choosePenaltyDuel,abandonPenaltyDuel,visiblePenaltyDuel
 import {ensurePenaltyDrawTables} from './tournamentPenaltyDraw.js';
 import {penaltyDuelReference} from './penaltyTournamentDraw.js';
 import {realTournamentFeaturesEnabled} from './tournamentLaunchPolicy.js';
-import {penaltyAbsenceDecision} from './penaltyTournamentProgressRules.js';
+import {penaltyAbsenceDecision,penaltyIdleDecision} from './penaltyTournamentProgressRules.js';
 
 export const tournamentPenaltyMatchRouter=Router();
 const fail=(status,message)=>Object.assign(new Error(message),{status});
@@ -130,6 +130,7 @@ tournamentPenaltyMatchRouter.post('/penalty/matches/:id/choose',requireSession,r
   return mutate(req,res,r=>{
     if(r.status!=='playing'||!r.match_state||r.match_state.finished)throw fail(409,'Le match n est pas en cours.');
     const viewer=side(r,req.userId),s=r.match_state;
+    if(penaltyIdleDecision(r)?.winner===(viewer==='host'?'guest':'host'))throw fail(409,'Temps ecoule : tu es disqualifie.');
     try{choosePenaltyDuel(s,viewer,direction);}catch(e){throw fail(409,e.message);}
     r[viewer+'_seen_at']=new Date();
     if(s.finished){
