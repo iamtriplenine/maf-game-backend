@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {initialLudo,rollLudo,moveLudo,forfeitLudo,validMoves} from './ludoEngine.js';
 test('Tour initial + serveur impose le lancer',()=>{
  const s=initialLudo(10);assert.equal(s.toMove,'host');assert.deepEqual(validMoves(s),[]);
- const a=rollLudo(s,'host',()=>3,11);assert.equal(a.toMove,'guest');assert.equal(a.roll,null);
+ const a=rollLudo(s,'host',()=>3,11);assert.equal(a.toMove,'host');assert.equal(a.homeTries,1);assert.equal(a.roll,null);
  assert.equal(s.toMove,'host');assert.throws(()=>rollLudo(s,'guest',()=>6));
 });
 test('six autorise sortie; coup illegitime refuse; six redonne le tour',()=>{
@@ -30,4 +30,20 @@ test('case depart protegee, depassement de 56 refuse et double lancer refuse',()
  const checked={...end,roll:2};assert.deepEqual(validMoves(checked),[]);
  const six=rollLudo(initialLudo(),'host',()=>6);
  assert.throws(()=>rollLudo(six,'host',()=>1));
+});
+
+test('tous les pions a la maison : trois essais avant de passer le tour',()=>{
+  let state=initialLudo(1000);
+  state=rollLudo(state,'host',()=>3,1001);
+  assert.equal(state.toMove,'host');assert.equal(state.homeTries,1);
+  state=rollLudo(state,'host',()=>2,1002);
+  assert.equal(state.toMove,'host');assert.equal(state.homeTries,2);
+  state=rollLudo(state,'host',()=>4,1003);
+  assert.equal(state.toMove,'guest');assert.equal(state.homeTries,0);
+});
+test('un 6 pendant les essais permet de sortir un pion',()=>{
+  let state=initialLudo(1000);
+  state=rollLudo(state,'host',()=>1,1001);
+  state=rollLudo(state,'host',()=>6,1002);
+  assert.deepEqual(state.valid,[0,1,2,3]);
 });

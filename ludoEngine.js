@@ -5,6 +5,7 @@ const START = { red: 0, yellow: 26 };
 const SAFE_GLOBAL = new Set([0, 8, 13, 21, 26, 34, 39, 47]);
 const bad = (message) => { throw new Error(message); };
 export const LUDO_TURN_MS = 120000;
+const MAX_HOME_TRIES = 3;
 export function validMoves(state) {
   if (state.finished || state.roll == null) return [];
   const who = state.toMove;
@@ -35,8 +36,18 @@ export function rollLudo(before,side,random=() => crypto.randomInt(1,7),now=Date
   next.valid=validMoves(next);
   if (next.valid.length===0) {
     next.roll=null;
-    next.toMove=side==='host'?'guest':'host';
-    next.lastAction+= ' · aucun déplacement possible';
+    const color=next.colors[side];
+    const allHome=next.tokens[color].every(x=>x===-1);
+    const tries=Number(before.homeTries||0)+1;
+    if (allHome && tries<MAX_HOME_TRIES) {
+      // Regle classique : tous les pions a la maison = jusqu'a 3 essais pour sortir un 6.
+      next.homeTries=tries;
+      next.lastAction+=` · essai ${tries}/${MAX_HOME_TRIES}, relance`;
+    } else {
+      next.homeTries=0;
+      next.toMove=side==='host'?'guest':'host';
+      next.lastAction+= ' · aucun déplacement possible';
+    }
   }
   return next;
 }
@@ -61,6 +72,7 @@ export function moveLudo(before,side,index,now=Date.now()) {
     }
   }
   const six=next.roll===6;
+  next.homeTries=0;
   next.roll=null;next.valid=[];next.version++;next.lastMoveAt=now;
   next.lastAction=`${side} a déplacé le pion ${index+1}`;
   if(next.tokens[color].every(x=>x===56)) {
@@ -90,6 +102,13 @@ export function autoTurnLudo(before, rollRandom=() => crypto.randomInt(1,7), pic
     // Meme si aucun pion ne peut jouer, le resultat du de est connu cote serveur.
     const match = /a obtenu ([1-6])/.exec(state.lastAction);
     rolled = match ? Number(match[1]) : null;
+    // Tour automatique apres minuteur : pas de relance, le tour passe au rival.
+    if (state.roll == null && state.toMove === side && !state.finished) {
+      state = structuredClone(state);
+      state.homeTries = 0;
+      state.toMove = side === 'host' ? 'guest' : 'host';
+      state.lastAction = state.lastAction.replace(/ · essai \d\/\d, relance/, ' · aucun déplacement possible');
+    }
   }
   let movedIndex = null;
   if (state.roll != null) {
