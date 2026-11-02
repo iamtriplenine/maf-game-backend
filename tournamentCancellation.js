@@ -95,7 +95,7 @@ export async function cancelTournament(id, reason, expectedRevision = null) {
       SELECT user_id,fee_paid FROM maf_tournament_entries
       WHERE tournament_id=$1 AND status='reserved' ORDER BY user_id FOR UPDATE`, [id]
     )).rows;
-    if (reason === 'incomplete' && (tournament.game !== 'penalty') && entries.length >= 10) {
+    if (reason === 'incomplete' && entries.length >= (tournament.game === 'penalty' ? 2 : 10)) {
       await c.query('COMMIT');
       return null;
     }
@@ -109,7 +109,10 @@ export async function cancelTournament(id, reason, expectedRevision = null) {
     const matchTable = (await c.query(`SELECT to_regclass('maf_tournament_qualification_matches') AS name`)).rows[0]?.name;
     const started = matchTable ? await c.query(`SELECT 1 FROM maf_tournament_qualification_matches
       WHERE tournament_id=$1 LIMIT 1`, [id]) : {rowCount:0};
-    if (started.rowCount) {
+    const penaltyDrawTable=(await c.query(`SELECT to_regclass('maf_tournament_penalty_draws') AS name`)).rows[0]?.name;
+    const penaltyStarted=penaltyDrawTable ? await c.query(`SELECT 1 FROM maf_tournament_penalty_draws
+      WHERE tournament_id=$1 LIMIT 1`,[id]) : {rowCount:0};
+    if (started.rowCount || penaltyStarted.rowCount) {
       if (reason === 'incomplete') { await c.query('COMMIT'); return null; }
       throw fail(409, 'Qualifications deja lancees : suppression bloquee.');
     }
@@ -155,8 +158,8 @@ export function maintainTournamentCancellations() {
     const minPlayers = 10;
     const { rows } = await pool.query(`SELECT t.id FROM maf_tournaments t
       WHERE t.game IN ('monopoly','penalty') AND t.status='published' AND t.cancelled_at IS NULL AND t.starts_at <= now()
-        AND (t.game='penalty' OR (SELECT count(*) FROM maf_tournament_entries e
-             WHERE e.tournament_id=t.id AND e.status='reserved') < $1)
+        AND (SELECT count(*) FROM maf_tournament_entries e
+             WHERE e.tournament_id=t.id AND e.status='reserved') < CASE WHEN t.game='penalty' THEN 2 ELSE $1 END
       ORDER BY t.starts_at,t.id LIMIT 100`, [minPlayers]);
     let cancelled = 0;
     for (const row of rows) {

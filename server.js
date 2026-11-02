@@ -12,6 +12,7 @@ import { tournamentFinaleRouter, maintainFinaleStarts, maintainFinaleMatches } f
 import { tournamentAwardsRouter, maintainTournamentAwardCredits } from "./tournamentAwards.js";
 import { tournamentSkinsRouter } from "./tournamentSkins.js";
 import { tournamentCancellationRouter, maintainTournamentCancellations } from "./tournamentCancellation.js";
+import { tournamentPenaltyDrawRouter, maintainPenaltyDrawStarts } from "./tournamentPenaltyDraw.js";
 import { pool } from "./db.js";
 import { ownerGiftsRouter } from "./ownerGifts.js";
 import { authRouter } from "./auth.js";
@@ -66,6 +67,7 @@ app.use("/api/rooms", roomsRouter); // Salons et tir au but (etape 2)
 app.use("/api", walletRouter);
 app.use("/api/win-practice", winPracticeRouter);
 app.use("/api/tournaments", tournamentCancellationRouter);
+app.use("/api/tournaments", tournamentPenaltyDrawRouter);
 app.use("/api/tournaments", tournamentQualificationRouter);
 app.use("/api/tournaments", tournamentFinalistsRouter);
 app.use("/api/tournaments", tournamentFinaleRouter);
@@ -102,6 +104,9 @@ void ensureMonopolyVoices().catch(error => console.error("monopoly voices setup:
 // Etape 3 : rattrapage des tournois incomplets apres demarrage ou reveil du serveur.
 setInterval(() => { void maintainTournamentCancellations().catch(error => console.error("tournament cancellations:",error.message)); }, 30000).unref();
 void maintainTournamentCancellations().catch(error => console.error("tournament cancellations setup:",error.message));
+// Tirage automatique et durable des duels Tir-au-but, avec rattrapage apres redemarrage.
+setInterval(() => { void maintainPenaltyDrawStarts().catch(e => console.error("penalty tournament draws:", e.message)); }, 30000).unref();
+void maintainPenaltyDrawStarts().catch(e => console.error("penalty draws setup:", e.message));
 
 // Etape 5 : rattrapage serveur, sans dependance a un onglet navigateur.
 // Le vrai lancement reste desactive tant que MAF_TOURNAMENT_REAL_START_ENABLED n'est pas 'true'.
