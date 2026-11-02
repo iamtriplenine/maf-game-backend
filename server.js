@@ -13,6 +13,7 @@ import { tournamentAwardsRouter, maintainTournamentAwardCredits } from "./tourna
 import { tournamentSkinsRouter } from "./tournamentSkins.js";
 import { tournamentCancellationRouter, maintainTournamentCancellations } from "./tournamentCancellation.js";
 import { tournamentPenaltyDrawRouter, maintainPenaltyDrawStarts } from "./tournamentPenaltyDraw.js";
+import { tournamentPenaltyMatchRouter } from "./tournamentPenaltyMatch.js";
 import { pool } from "./db.js";
 import { ownerGiftsRouter } from "./ownerGifts.js";
 import { authRouter } from "./auth.js";
@@ -68,6 +69,7 @@ app.use("/api", walletRouter);
 app.use("/api/win-practice", winPracticeRouter);
 app.use("/api/tournaments", tournamentCancellationRouter);
 app.use("/api/tournaments", tournamentPenaltyDrawRouter);
+app.use("/api/tournaments", tournamentPenaltyMatchRouter);
 app.use("/api/tournaments", tournamentQualificationRouter);
 app.use("/api/tournaments", tournamentFinalistsRouter);
 app.use("/api/tournaments", tournamentFinaleRouter);

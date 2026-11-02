@@ -125,7 +125,7 @@ export function maintainPenaltyDrawStarts(){
   return processing;
 }
 function renderMatch(r){return {
-  reference:penaltyDuelReference(Number(r.tournament_id),Number(r.round_no),Number(r.match_no),r.id),
+  id:String(r.id),reference:penaltyDuelReference(Number(r.tournament_id),Number(r.round_no),Number(r.match_no),r.id),
   tournamentId:Number(r.tournament_id),round:Number(r.round_no),matchNo:Number(r.match_no),
   title:r.title,status:r.status,scheduledAt:r.scheduled_at,
   host:r.host_name,guest:r.guest_name,winner:r.winner_name||null,
