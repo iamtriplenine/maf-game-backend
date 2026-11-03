@@ -62,3 +62,10 @@ export function penaltyIdleDecision(match, now = Date.now()) {
   if (idle.length !== 1) return null;
   return {winner: idle[0] === 'host' ? 'guest' : 'host', reason: 'inactivite_tir'};
 }
+// Double forfait : acceptable seulement s'il reste au moins deux qualifies pour le tour suivant.
+// Sinon (finale, demi-finale avec un seul vainqueur, plus aucun qualifie) il n'y aurait ni finale
+// ni champion valide : les duels concernes sont a rejouer (reprogrammation par le proprietaire).
+export function penaltyDoubleForfeitReplays(roundMatches, qualifierCount) {
+  const doubles = roundMatches.filter(m => !m.winner_id && m.match_state?.doubleForfeit === true);
+  return doubles.length > 0 && Number(qualifierCount) < 2 ? doubles : [];
+}

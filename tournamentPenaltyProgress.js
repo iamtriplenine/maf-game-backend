@@ -6,7 +6,7 @@ import {requireSession} from './auth.js';
 import {isOwnerAccount} from './accountRoles.js';
 import {ensurePenaltyMatchState} from './tournamentPenaltyMatch.js';
 import {beginPenaltyDuel} from './penaltyTournamentMatchRules.js';
-import {buildNextPenaltyRound,penaltyAbsenceDecision} from './penaltyTournamentProgressRules.js';
+import {buildNextPenaltyRound,penaltyAbsenceDecision,penaltyDoubleForfeitReplays} from './penaltyTournamentProgressRules.js';
 import {realTournamentFeaturesEnabled} from './tournamentLaunchPolicy.js';
 
 export const tournamentPenaltyProgressRouter=Router();
@@ -100,6 +100,25 @@ export async function progressPenaltyTournament(tournamentId){
     const round=Math.max(...matches.map(x=>Number(x.round_no)));
     const current=matches.filter(m=>Number(m.round_no)===round);
     let changed=false;
+    // Reparation : un champion non verse issu d'un tour avec double forfait n'a joue aucune finale.
+    const champRow=(await c.query(`SELECT user_id,awarded_at FROM maf_tournament_penalty_champions
+      WHERE tournament_id=$1 FOR UPDATE`,[id])).rows[0];
+    if(champRow){
+      const wrong=penaltyDoubleForfeitReplays(current,0);
+      let paid=Boolean(champRow.awarded_at);
+      if(!paid&&(await c.query(`SELECT to_regclass('maf_tournament_penalty_award_batches') AS t`)).rows[0].t){
+        paid=(await c.query(`SELECT 1 FROM maf_tournament_penalty_award_batches WHERE tournament_id=$1`,[id])).rowCount>0;
+      }
+      if(wrong.length&&!paid){
+        await c.query('DELETE FROM maf_tournament_penalty_champions WHERE tournament_id=$1',[id]);
+        for(const m of wrong)await c.query(`UPDATE maf_tournament_penalty_matches SET status='attention',
+          attention_reason='double_forfait_a_rejouer',revision=revision+1 WHERE id=$1`,[m.id]);
+        await audit(c,'tournament_penalty_champion_revoked',{tournament_id:id,round,
+          match_ids:wrong.map(m=>String(m.id)),reason:'double_forfait_sans_finale'});
+        await c.query('COMMIT');return {changed:true,round,replay:true};
+      }
+      await c.query('COMMIT');return {changed:false,round,complete:true};
+    }
     for(const m of current){
       const action=penaltyAbsenceDecision(m);
       if(action){await updateTimeout(c,m,action);changed=true;
@@ -115,6 +134,14 @@ export async function progressPenaltyTournament(tournamentId){
     if(champion){await c.query('COMMIT');return {changed,round,complete:true};}
     const exemptions=(await c.query(`SELECT user_id FROM maf_tournament_penalty_byes WHERE tournament_id=$1 AND round_no=$2`,[id,round])).rows;
     const qualifiers=current.filter(m=>m.winner_id).map(m=>Number(m.winner_id)).concat(exemptions.map(x=>Number(x.user_id)));
+    const replays=penaltyDoubleForfeitReplays(current,qualifiers.length);
+    if(replays.length){
+      for(const m of replays)await c.query(`UPDATE maf_tournament_penalty_matches SET status='attention',
+        attention_reason='double_forfait_a_rejouer',revision=revision+1 WHERE id=$1 AND status='finished' AND winner_id IS NULL`,[m.id]);
+      await audit(c,'tournament_penalty_double_forfeit_replay',{tournament_id:id,round,
+        match_ids:replays.map(m=>String(m.id)),qualifiers:qualifiers.length});
+      await c.query('COMMIT');return {changed:true,round,replay:true};
+    }
     if(!qualifiers.length){await c.query('COMMIT');return {changed,round,noQualifier:true};} // tous disqualifies : a traiter par le proprietaire
     const plan=buildNextPenaltyRound(qualifiers);
     if(plan.champion){
@@ -153,8 +180,12 @@ export function maintainPenaltyTournamentProgress(){
     const {rows}=await pool.query(`SELECT t.id FROM maf_tournaments t
       JOIN maf_tournament_penalty_draws d ON d.tournament_id=t.id
       WHERE t.game='penalty' AND t.status='published' AND t.deleted_at IS NULL
-        AND t.cancelled_at IS NULL AND NOT EXISTS
+        AND t.cancelled_at IS NULL AND (NOT EXISTS
         (SELECT 1 FROM maf_tournament_penalty_champions ch WHERE ch.tournament_id=t.id)
+        OR EXISTS (SELECT 1 FROM maf_tournament_penalty_champions ch WHERE ch.tournament_id=t.id AND ch.awarded_at IS NULL
+          AND EXISTS (SELECT 1 FROM maf_tournament_penalty_matches m WHERE m.tournament_id=t.id AND m.status='finished'
+            AND m.winner_id IS NULL AND m.match_state->>'doubleForfeit'='true'
+            AND m.round_no=(SELECT max(x.round_no) FROM maf_tournament_penalty_matches x WHERE x.tournament_id=t.id))))
       ORDER BY t.starts_at,t.id LIMIT 100`);
     let updated=0;
     for(const row of rows){if((await progressPenaltyTournament(Number(row.id))).changed)updated++;}

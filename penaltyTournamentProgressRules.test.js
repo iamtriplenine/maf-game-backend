@@ -19,3 +19,19 @@ test('deconnexion 2min : joueur present avance',()=>assert.deepEqual(penaltyAbse
 test('reconnexion dans les 2 minutes',()=>assert.equal(penaltyAbsenceDecision({...base,status:'playing',playing_at:new Date(200000).toISOString(),host_seen_at:new Date(201000).toISOString(),guest_seen_at:new Date(319000).toISOString()},319000),null));
 test('deux joueurs deconnectes : pas de champion artificiel',()=>assert.deepEqual(penaltyAbsenceDecision({...base,status:'playing',playing_at:new Date(200000).toISOString(),host_seen_at:new Date(201000).toISOString(),guest_seen_at:new Date(201000).toISOString()},201000+600000),{winner:null,reason:'deux_deconnectes'}));
 test('aucune elimination avant le debut du match',()=>assert.equal(penaltyAbsenceDecision({...base,scheduled_at:new Date(800000).toISOString()},300000),null));
+
+import {penaltyDoubleForfeitReplays} from './penaltyTournamentProgressRules.js';
+const dbl=(id)=>({id,winner_id:null,match_state:{doubleForfeit:true}});
+const won=(id,w)=>({id,winner_id:w,match_state:{winner:'host'}});
+test('double forfait en finale : a rejouer (aucun qualifie)',()=>{
+  assert.deepEqual(penaltyDoubleForfeitReplays([dbl(1)],0).map(m=>m.id),[1]);
+});
+test('double forfait en demi-finale avec un seul vainqueur : a rejouer',()=>{
+  assert.deepEqual(penaltyDoubleForfeitReplays([dbl(1),won(2,9)],1).map(m=>m.id),[1]);
+});
+test('double forfait avec au moins deux qualifies : le tournoi continue',()=>{
+  assert.deepEqual(penaltyDoubleForfeitReplays([dbl(1),won(2,8),won(3,9)],2),[]);
+});
+test('aucun double forfait : rien a rejouer',()=>{
+  assert.deepEqual(penaltyDoubleForfeitReplays([won(1,8)],1),[]);
+});
