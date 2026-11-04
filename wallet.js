@@ -125,12 +125,13 @@ export function waveUrl(value) {
     throw fail(400,'Montant de paiement invalide.');
   url.searchParams.set('amount', String(value)); return url.toString();
 }
+const OWNER_VALIDATION_TYPE = 'text/x-owner-validation';
 const view = row => {
-  const { proof, proof_hash, request_key, ...safe } = row;
+  const { proof, proof_hash, request_key, proof_type, ...safe } = row;
   const fee = Number(row.fee_amount ?? 0);
   const ownerFee = Number(row.owner_fee_amount ?? 0);
   const total = Number(row.amount) + fee + ownerFee;
-  return { ...safe, fee_amount:fee, owner_fee_amount:ownerFee, total_amount:total, has_proof: Boolean(proof_hash),
+  return { ...safe, fee_amount:fee, owner_fee_amount:ownerFee, total_amount:total, has_proof: Boolean(proof_hash), validated_without_proof: proof_type === OWNER_VALIDATION_TYPE,
     ...(row.kind === 'deposit' ? { payment_url: waveUrl(total) } : {}) };
 };
 export function parseProof(value) {
@@ -313,7 +314,7 @@ walletRouter.get('/admin/transactions', route(async (req,res) => {
   if (status && !statuses.includes(status) || kind && !['deposit','withdrawal'].includes(kind)) throw fail(400,'Filtre invalide.');
   const limit = Math.floor(Math.min(100,Math.max(1,Number(req.query.limit)||50)));
   const offset = Math.floor(Math.max(0,Number(req.query.offset)||0));
-  const { rows } = await pool.query(`SELECT t.id,t.user_id,u.pseudo,t.kind,t.amount,t.fee_amount,t.owner_fee_amount,t.currency,t.phone,t.status,t.proof_hash,
+  const { rows } = await pool.query(`SELECT t.id,t.user_id,u.pseudo,t.kind,t.amount,t.fee_amount,t.owner_fee_amount,t.currency,t.phone,t.status,t.proof_hash,t.proof_type,
     t.payment_reference,t.admin_note,t.created_at,t.submitted_at,t.decided_at FROM maf_transactions t JOIN maf_users u ON u.id=t.user_id
     WHERE ($1::text IS NULL OR t.status=$1) AND ($2::text IS NULL OR t.kind=$2)
     ORDER BY t.created_at DESC,t.id LIMIT $3 OFFSET $4`,[status,kind,limit,offset]);
@@ -323,7 +324,7 @@ walletRouter.get('/admin/transactions', route(async (req,res) => {
 }));
 walletRouter.get('/admin/transactions/:id', route(async (req,res) => {
   key(req.params.id);
-  const {rows} = await pool.query(`SELECT t.id,t.user_id,u.pseudo,t.kind,t.amount,t.fee_amount,t.owner_fee_amount,t.currency,t.phone,t.status,t.proof_hash,
+  const {rows} = await pool.query(`SELECT t.id,t.user_id,u.pseudo,t.kind,t.amount,t.fee_amount,t.owner_fee_amount,t.currency,t.phone,t.status,t.proof_hash,t.proof_type,
     t.payment_reference,t.admin_note,t.created_at,t.submitted_at,t.decided_at FROM maf_transactions t JOIN maf_users u ON u.id=t.user_id WHERE t.id=$1`,[req.params.id]);
   if (!rows[0]) throw fail(404,'Demande introuvable.');
   res.json({transaction:view(rows[0])});
@@ -342,6 +343,8 @@ for (const kind of ['deposit','withdrawal']) for (const decision of ['approve','
     const note = typeof req.body.note === 'string' ? req.body.note.trim().slice(0,1000) : '';
     if (decision === 'approve' && (reference.length < 4 || reference.length > 160)) throw fail(400,'Reference Wave verifiee requise (4 a 160 caracteres).');
     if (decision === 'reject' && !note) throw fail(400,'Motif du refus requis.');
+    // Validation par le proprietaire d'un depot dont le client a oublie la capture (paiement verifie sur Wave).
+    const withoutProof = kind === 'deposit' && decision === 'approve' && req.body.without_proof === true;
     const row = await tx(async c => {
       // Depot parraine : verrouiller les deux comptes par ID croissant, puis la transaction.
       const info = (await c.query('SELECT t.user_id,r.partner_id FROM maf_transactions t LEFT JOIN maf_user_referrals r ON r.user_id=t.user_id WHERE t.id=$1',[req.params.id])).rows[0];
@@ -357,7 +360,15 @@ for (const kind of ['deposit','withdrawal']) for (const decision of ['approve','
         return t;
       }
       if (['approved','rejected'].includes(t.status)) throw fail(409,'Demande deja traitee.');
-      if (decision === 'approve' && t.status !== 'pending') throw fail(409,'Attendre la capture du paiement avant confirmation.');
+      if (decision === 'approve' && t.status !== 'pending' && !(withoutProof && t.status === 'awaiting_payment'))
+        throw fail(409,'Attendre la capture du paiement avant confirmation.');
+      if (withoutProof && t.status === 'awaiting_payment') {
+        // Marqueur explicite et tracable : la contrainte de base exige une preuve pour un depot confirme.
+        const marker = Buffer.from('Depot valide par le proprietaire apres verification du paiement Wave, sans capture client.');
+        await c.query('UPDATE maf_transactions SET proof=$2,proof_type=$3,proof_hash=$4 WHERE id=$1',
+          [t.id,marker,OWNER_VALIDATION_TYPE,crypto.createHash('sha256').update('owner-validation:'+t.id).digest('hex')]);
+        await audit(c,req.adminActor,'deposit_validated_without_proof',{ id:t.id,user_id:u.id,amount:t.amount,payment_reference:reference });
+      }
       await normalizeBonusWithdrawalFees(c,t,u,req.adminActor);
       if (kind === 'deposit' && decision === 'approve' || kind === 'withdrawal' && decision === 'reject') {
         const column = kind === 'withdrawal' && t.currency === 'V' ? 'bonus_balance' : 'balance';
