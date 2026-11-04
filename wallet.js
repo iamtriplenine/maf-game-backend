@@ -501,6 +501,24 @@ walletRouter.get('/admin/users', route(async (req,res) => {
   const total = (await pool.query(`SELECT count(*)::integer AS total FROM maf_users WHERE ${where}`,[q])).rows[0].total;
   res.json({ users:rows.map(row=>({...row,account_role:row.id === ownerId ? 'owner' : row.account_role})),total,limit,offset,can_delete:canDelete });
 }));
+// Activite d'un joueur pour le controle des retraits : parties (gain/perte, adversaire) et mouvements d'argent.
+walletRouter.get('/admin/users/:id/activity', route(async (req,res) => {
+  if (!/^[1-9]\d{0,9}$/.test(req.params.id)) throw fail(400,'Identifiant invalide.');
+  const uid = Number(req.params.id), limit = Math.floor(Math.min(60,Math.max(1,Number(req.query.limit)||30)));
+  const h = await import('./history.js');
+  await h.ensureHistoryTables();
+  const g = (await pool.query(`WITH entries AS (${h.GAMES_SQL()})
+    SELECT (SELECT count(*)::integer FROM entries) AS total,
+      (SELECT jsonb_build_object('played',count(*) FILTER (WHERE status='finished'),'won',count(*) FILTER (WHERE outcome='won'),
+        'lost',count(*) FILTER (WHERE outcome='lost'),'net',coalesce(sum(net),0)) FROM entries) AS summary,
+      coalesce((SELECT jsonb_agg(p ORDER BY p.updated_at DESC,p.id::bigint DESC,p.game DESC)
+        FROM (SELECT * FROM entries ORDER BY updated_at DESC,id::bigint DESC,game DESC LIMIT $2) p),'[]'::jsonb) AS items`,[uid,limit])).rows[0];
+  const t = (await pool.query(`WITH entries AS (${h.TRANSACTIONS_SQL()})
+    SELECT (SELECT count(*)::integer FROM entries) AS total,
+      coalesce((SELECT jsonb_agg(p ORDER BY p.created_at DESC,p.id DESC)
+        FROM (SELECT * FROM entries ORDER BY created_at DESC,id DESC LIMIT $2) p),'[]'::jsonb) AS items`,[uid,limit])).rows[0];
+  res.json({ user_id:uid,games:g.items,total_games:g.total,summary:g.summary,movements:t.items,total_movements:t.total });
+}));
 // A test-admin coupon or API key alone never grants account-deletion rights.
 walletRouter.delete('/admin/users/:id', requireSession, route(async (req,res) => {
   if (!/^[1-9]\d*$/.test(req.params.id)) throw fail(400, 'Identifiant invalide.');

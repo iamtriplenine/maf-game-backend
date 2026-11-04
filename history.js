@@ -34,6 +34,7 @@ historyRouter.use((_req,_res,next) => { ensureRooms().then(() => ensureMonopolyR
 
 // Une demande de depot/retrait garde une seule ligne avec son etat courant.
 // Les mouvements des jeux proviennent du journal atomique, sans doubler les paiements.
+export const TRANSACTIONS_SQL = () => transactions;
 const transactions = `
   SELECT 'wallet:' || t.id::text AS id,t.kind,t.amount,t.currency,t.status,
     CASE WHEN t.kind='deposit' AND t.status='approved' THEN t.amount
@@ -114,6 +115,7 @@ historyRouter.get('/transactions',route(async (req,res) => {
   res.json({ ...rows[0],limit,offset });
 }));
 
+export const GAMES_SQL = () => games;
 const games = `
   SELECT r.id::text AS id,trim(r.code) AS code,r.game,r.shots,r.stake,r.status,r.payout,r.escrow,
     r.created_at,r.updated_at,r.settled_at,
@@ -174,3 +176,5 @@ historyRouter.get('/games',route(async (req,res) => {
     [req.userId,limit,offset]);
   res.json({ ...rows[0],limit,offset });
 }));
+
+export const ensureHistoryTables = () => ensureRooms().then(() => ensureMonopolyRooms()).then(() => ensureTournaments());
