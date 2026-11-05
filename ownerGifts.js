@@ -60,7 +60,6 @@ export function ensureOwnerGifts(){
       await c.query(`ALTER TABLE maf_studio_skin_unlocks ADD CONSTRAINT maf_studio_skin_unlocks_prize_kind_check
         CHECK(prize_kind IN ('participation','winner','owner_gift'))`);
       await c.query("ALTER TABLE maf_users ADD COLUMN IF NOT EXISTS profile_background_id text NOT NULL DEFAULT 'classic'");
-
       // Conserve les fonds deja gagnes dans des coffres ouverts.
       await c.query(`INSERT INTO maf_profile_background_unlocks(user_id,background_id)
         SELECT DISTINCT r.user_id,'matrix-rain'
@@ -69,6 +68,7 @@ export function ensureOwnerGifts(){
         (r.outcome->>'backgroundId'='matrix-rain' OR
          r.outcome @> '{"lots":[{"kind":"background","backgroundId":"matrix-rain"}]}'::jsonb)
         ON CONFLICT(user_id,background_id) DO NOTHING`);
+
       await c.query('COMMIT');
     }catch(e){await c.query('ROLLBACK').catch(()=>{});throw e;}finally{c.release();}
   })().catch(e=>{ready=null;throw e;});
@@ -177,7 +177,7 @@ ownerGiftsRouter.post('/:id/open',requireSession,wrap(async(req,res)=>{
           VALUES($1,$2,NULL,'owner_gift') ON CONFLICT(user_id,skin_id) DO NOTHING`,[req.userId,p.skinId]);
         item.skinId=p.skinId;
       }else if(lotKind==='background'){
-        if(p.backgroundId==='matrix-rain') {
+        if(['matrix-rain','soap-bubbles'].includes(p.backgroundId)) {
           await c.query(`INSERT INTO maf_profile_background_unlocks(user_id,background_id)
             VALUES($1,$2) ON CONFLICT(user_id,background_id) DO NOTHING`,[req.userId,p.backgroundId]);
         }

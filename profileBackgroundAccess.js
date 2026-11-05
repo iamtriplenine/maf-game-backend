@@ -11,10 +11,14 @@ export function ensureProfileBackgroundAccess() {
       await c.query('SELECT pg_advisory_xact_lock(62498620)');
       await c.query(`CREATE TABLE IF NOT EXISTS maf_profile_background_unlocks (
         user_id integer NOT NULL REFERENCES maf_users(id) ON DELETE CASCADE,
-        background_id text NOT NULL CHECK (background_id IN ('matrix-rain')),
+        background_id text NOT NULL CHECK (background_id IN ('matrix-rain','soap-bubbles')),
         unlocked_at timestamptz NOT NULL DEFAULT now(),
         PRIMARY KEY(user_id, background_id)
       )`);
+      // Etend les droits existants sans attribuer le nouveau fond aux comptes.
+      await c.query('ALTER TABLE maf_profile_background_unlocks DROP CONSTRAINT IF EXISTS maf_profile_background_unlocks_background_id_check');
+      await c.query(`ALTER TABLE maf_profile_background_unlocks ADD CONSTRAINT maf_profile_background_unlocks_background_id_check
+        CHECK (background_id IN ('matrix-rain','soap-bubbles'))`);
       await c.query(`CREATE TABLE IF NOT EXISTS maf_profile_background_migrations (
         key text PRIMARY KEY, completed_at timestamptz NOT NULL DEFAULT now()
       )`);
@@ -36,7 +40,7 @@ export function ensureProfileBackgroundAccess() {
 
 export async function backgroundIsUnlocked(userId, backgroundId, c=pool) {
   if (backgroundId==='classic') return true;
-  if (backgroundId!=='matrix-rain') return false;
+  if (!['matrix-rain','soap-bubbles'].includes(backgroundId)) return false;
   await ensureProfileBackgroundAccess();
   const r=await c.query('SELECT 1 FROM maf_profile_background_unlocks WHERE user_id=$1 AND background_id=$2',[userId,backgroundId]);
   return r.rowCount>0;

@@ -1,7 +1,7 @@
 import { selectedTournamentSkin } from './studioSkinCatalog.js';
 
 export const OWNER_GIFT_KINDS = Object.freeze(['coupon','skin','background','image','balance','bonus']);
-export const OWNER_BACKGROUND_IDS = Object.freeze(['matrix-rain','classic']);
+export const OWNER_BACKGROUND_IDS = Object.freeze(['matrix-rain','soap-bubbles','classic']);
 export const MAX_GIFT_LOTS = 5;
 const fail = message => { throw Object.assign(new Error(message), { status: 400 }); };
 
