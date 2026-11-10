@@ -17,12 +17,17 @@ const INFO_REFRESH_MS = 60000;
 const STATUS_MAX_LENGTH = 180;
 const VOICE_DISTANCE = 8;
 const VOICE_MAX_MS = 30000;
-const VOICE_MAX_BYTES = 512 * 1024;
+const VOICE_WAV_RATE = 12000;
+const VOICE_MAX_BYTES = 44 + VOICE_WAV_RATE * 2 * VOICE_MAX_MS / 1000;
 const VOICE_TTL_MS = 90000;
 const VOICE_LIMIT = 64;
+const CHAT_TTL_MS = 120000;
+const CHAT_LIMIT = 64;
+const CHAT_MAX_LENGTH = 160;
 
 const players = new Map();
 const voiceClips = new Map();
+const chatMessages = new Map();
 let voiceTableReady;
 let voiceUploads = 0;
 let voiceCleanupBusy = false;
@@ -30,6 +35,27 @@ let statusTableReady;
 
 function present(player, now) {
   return Boolean(player?.t && now - player.t <= TTL_MS);
+}
+
+function voiceClientId(value) {
+  return typeof value === "string" && /^[a-zA-Z0-9_-]{16,64}$/.test(value) ? value : null;
+}
+
+function nearbyPlayers(userId, sender, now) {
+  return Array.from(players).filter(([id, player]) => id !== userId && present(player, now) &&
+    Math.hypot(player.x - sender.x, player.z - sender.z) <= VOICE_DISTANCE);
+}
+
+function voiceMime(audio) {
+  if (audio.toString("latin1", 0, 4) !== "RIFF") return sniffVoiceMime(audio);
+  // Le format de secours du client est du PCM mono signé, 12 kHz, 16 bits.
+  if (audio.length < 46 || audio.length % 2 || audio.readUInt32LE(4) !== audio.length - 8 ||
+      audio.toString("latin1", 8, 16) !== "WAVEfmt " || audio.readUInt32LE(16) !== 16 ||
+      audio.readUInt16LE(20) !== 1 || audio.readUInt16LE(22) !== 1 ||
+      audio.readUInt32LE(24) !== VOICE_WAV_RATE || audio.readUInt32LE(28) !== VOICE_WAV_RATE * 2 ||
+      audio.readUInt16LE(32) !== 2 || audio.readUInt16LE(34) !== 16 ||
+      audio.toString("latin1", 36, 40) !== "data" || audio.readUInt32LE(40) !== audio.length - 44) return null;
+  return "audio/wav";
 }
 
 function ensureVoiceTable() {
@@ -60,11 +86,14 @@ async function pruneVoiceClips() {
   }
 }
 
-async function finishVoiceClips(userId, ids) {
+async function finishVoiceClips(userId, ids, client = null) {
   const deleted = [];
   for (const id of ids) {
     const clip = voiceClips.get(id);
-    if (!clip?.listeners.delete(userId) || clip.listeners.size) continue;
+    const owner = clip?.listeners.get(userId);
+    if (owner === undefined || (client && owner !== null && owner !== client)) continue;
+    clip.listeners.delete(userId);
+    if (clip.listeners.size) continue;
     voiceClips.delete(id);
     deleted.push(id);
   }
@@ -76,14 +105,22 @@ async function finishVoiceClips(userId, ids) {
   }
 }
 
-function voiceInbox(userId, now) {
+function voiceInbox(userId, now, client) {
   const inbox = [];
   for (const [id, clip] of voiceClips) {
-    if (clip.expiresAt <= now || clip.listeners.get(userId) !== false) continue;
-    inbox.push({ id, name: clip.name });
+    const owner = clip.listeners.get(userId);
+    if (clip.expiresAt <= now || (owner !== null && (!client || owner !== client))) continue;
+    inbox.push({ id, name: clip.name, ms: clip.ms, at: clip.at });
     if (inbox.length >= 8) break;
   }
   return inbox;
+}
+
+function chatInbox(userId, now) {
+  return Array.from(chatMessages.values())
+    .filter(message => now - message.at < CHAT_TTL_MS && message.recipients.has(userId))
+    .slice(-16)
+    .map(({ id, authorId, name, text, at }) => ({ id, name, text, at, mine: authorId === userId }));
 }
 
 if (pool) {
@@ -138,8 +175,32 @@ async function refreshIdentity(userId, p) {
 
 function prune(now = Date.now()) {
   for (const [id, p] of players) if (now - p.t > TTL_MS * 4) players.delete(id);
+  for (const [id, message] of chatMessages) if (now - message.at >= CHAT_TTL_MS) chatMessages.delete(id);
 }
 setInterval(() => prune(), 15000).unref();
+
+worldPresenceRouter.post("/chat", requireSession, (req, res) => {
+  const userId = req.userId;
+  const sender = players.get(userId);
+  const now = Date.now();
+  if (!present(sender, now)) return res.status(409).json({ error: "Rejoins World pour écrire dans le chat." });
+  const text = typeof req.body?.text === "string" ? req.body.text.trim() : "";
+  if (!text || text.length > CHAT_MAX_LENGTH) {
+    return res.status(400).json({ error: "Écris un message de 1 à 160 caractères." });
+  }
+  if (now - (sender.chatSentAt || 0) < 750) {
+    return res.status(429).json({ error: "Attends un instant avant le prochain message." });
+  }
+  const recipients = new Set(nearbyPlayers(userId, sender, now).filter(([, player]) => player.chat).map(([id]) => id));
+  const count = recipients.size;
+  if (!count) return res.json({ count });
+  recipients.add(userId);
+  const id = randomUUID();
+  chatMessages.set(id, { id, authorId: userId, name: sender.name || "Joueur", text, at: now, recipients });
+  if (chatMessages.size > CHAT_LIMIT) chatMessages.delete(chatMessages.keys().next().value);
+  sender.chatSentAt = now;
+  res.json({ count });
+});
 
 worldPresenceRouter.post("/voice", requireSession, async (req, res) => {
   const sender = players.get(req.userId);
@@ -152,18 +213,13 @@ worldPresenceRouter.post("/voice", requireSession, async (req, res) => {
     return res.status(400).json({ error: "Vocal invalide ou trop long." });
   }
   const audio = Buffer.from(encoded, "base64");
-  const mime = sniffVoiceMime(audio);
+  const mime = voiceMime(audio);
   if (!mime || audio.length > VOICE_MAX_BYTES) {
     return res.status(400).json({ error: "Format audio non reconnu ou vocal trop lourd." });
   }
 
-  const listeners = new Map();
-  for (const [id, player] of players) {
-    if (id !== req.userId && player.voice && present(player, now) &&
-        Math.hypot(player.x - sender.x, player.z - sender.z) <= VOICE_DISTANCE) {
-      listeners.set(id, false);
-    }
-  }
+  const listeners = new Map(nearbyPlayers(req.userId, sender, now)
+    .filter(([, player]) => player.voice).map(([id]) => [id, null]));
   if (!listeners.size) return res.json({ count: 0 });
   if (sender.voiceUploading || now - (sender.voiceSentAt || 0) < 1500 ||
       voiceClips.size + voiceUploads >= VOICE_LIMIT) {
@@ -185,12 +241,12 @@ worldPresenceRouter.post("/voice", requireSession, async (req, res) => {
       if (!present(player, Date.now()) || !player.voice) listeners.delete(userId);
     }
     if (listeners.size) {
-      voiceClips.set(id, { expiresAt, listeners, name: sender.name || "Joueur" });
+      voiceClips.set(id, { expiresAt, listeners, name: sender.name || "Joueur", ms, at: now });
       sender.voiceSentAt = now;
     } else {
       await pool.query("delete from maf_world_voice_clips where id = $1", [id]);
     }
-    res.json({ count: listeners.size });
+    res.json({ count: listeners.size, id, at: now });
   } catch (error) {
     console.error("world voice send :", error.message);
     res.status(500).json({ error: "Impossible d’envoyer le vocal." });
@@ -203,21 +259,25 @@ worldPresenceRouter.post("/voice", requireSession, async (req, res) => {
 worldPresenceRouter.post("/voice/:id/listen", requireSession, async (req, res) => {
   const { id } = req.params;
   const clip = voiceClips.get(id);
-  if (!clip || clip.expiresAt <= Date.now() || clip.listeners.get(req.userId) !== false) {
+  const client = voiceClientId(req.body?.voiceClient);
+  const previous = clip?.listeners.get(req.userId);
+  if (!clip || clip.expiresAt <= Date.now() || (previous !== null && (!client || previous !== client))) {
     return res.status(404).end();
   }
-  clip.listeners.set(req.userId, true); // un seul retrait du fichier par destinataire
+  const owner = client || "legacy";
+  // La même page peut réessayer après une erreur. La fin d'écoute retire l'accès.
+  clip.listeners.set(req.userId, owner);
   try {
     const { rows: [row] } = await pool.query(
       "select audio, mime from maf_world_voice_clips where id = $1 and expires_at > now()", [id]
     );
-    if (!row || clip.listeners.get(req.userId) !== true || clip.expiresAt <= Date.now()) {
+    if (!row || clip.listeners.get(req.userId) !== owner || clip.expiresAt <= Date.now()) {
       return res.status(404).end();
     }
     res.set({ "Content-Type": row.mime, "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff" });
     res.send(row.audio);
   } catch (error) {
-    if (clip.listeners.get(req.userId) === true) clip.listeners.set(req.userId, false);
+    if (previous === null && clip.listeners.get(req.userId) === owner) clip.listeners.set(req.userId, null);
     console.error("world voice listen :", error.message);
     res.status(500).end();
   }
@@ -248,6 +308,7 @@ worldPresenceRouter.post("/presence", requireSession, async (req, res) => {
   const userId = req.userId;
   const now = Date.now();
   const b = req.body || {};
+  const client = voiceClientId(b.voiceClient);
   let p = players.get(userId);
   if (!p) {
     p = { x: 0, z: 0, yaw: 0, mv: 0, veh: 0, t: 0, name: "", skin: "loki", infoAt: 0, status: "", statusVersion: 0 };
@@ -255,13 +316,13 @@ worldPresenceRouter.post("/presence", requireSession, async (req, res) => {
   }
   if (now - p.t > TTL_MS) p.infoAt = 0;   // il revient dans le monde : on relit son skin actuel
   const x = Number(b.x), z = Number(b.z), yaw = Number(b.yaw);
-  const wasListening = p.voice === true;
   if (Number.isFinite(x) && Number.isFinite(z) && Math.abs(x) <= MAX_COORD && Math.abs(z) <= MAX_COORD) {
     p.x = x; p.z = z;
     p.yaw = Number.isFinite(yaw) ? yaw : p.yaw;
     p.mv = b.mv ? 1 : 0;
     p.veh = b.veh ? 1 : 0;
-    p.voice = b.voice === true;
+    p.chat = Boolean(client);
+    p.voice = p.chat || b.voice === true;
     p.t = now;
   }
   try {
@@ -269,10 +330,8 @@ worldPresenceRouter.post("/presence", requireSession, async (req, res) => {
   } catch (error) {
     console.error("world presence :", error.message);
   }
-  if (wasListening && !p.voice) {
-    await finishVoiceClips(userId, voiceClips.keys());
-  } else if (Array.isArray(b.voiceDone) && b.voiceDone.length) {
-    await finishVoiceClips(userId, b.voiceDone.slice(0, 16));
+  if (Array.isArray(b.voiceDone) && b.voiceDone.length) {
+    await finishVoiceClips(userId, b.voiceDone.slice(0, 16), client);
   }
   const out = [];
   let onlineCount = 0;
@@ -288,7 +347,9 @@ worldPresenceRouter.post("/presence", requireSession, async (req, res) => {
   }
   res.json({
     me: { name: p.name, skin: p.skin, status: p.status, statusVersion: p.statusVersion },
-    players: out, onlineCount, voices: p.voice ? voiceInbox(userId, now) : []
+    players: out, onlineCount,
+    voices: p.voice ? voiceInbox(userId, now, client) : [],
+    chat: client ? chatInbox(userId, now) : []
   });
 });
 
