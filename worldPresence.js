@@ -40,6 +40,7 @@ worldPresenceRouter.post("/presence", requireSession, async (req, res) => {
     p = { x: 0, z: 0, yaw: 0, mv: 0, veh: 0, t: 0, name: "", skin: "loki", infoAt: 0 };
     players.set(userId, p);
   }
+  if (now - p.t > TTL_MS) p.infoAt = 0;   // il revient dans le monde : on relit son skin actuel
   const x = Number(b.x), z = Number(b.z), yaw = Number(b.yaw);
   if (Number.isFinite(x) && Number.isFinite(z) && Math.abs(x) <= MAX_COORD && Math.abs(z) <= MAX_COORD) {
     p.x = x; p.z = z;
@@ -63,7 +64,7 @@ worldPresenceRouter.post("/presence", requireSession, async (req, res) => {
     });
     if (out.length >= MAX_RETURN) break;
   }
-  res.json({ players: out });
+  res.json({ me: { name: p.name, skin: p.skin }, players: out });
 });
 
 worldPresenceRouter.post("/leave", requireSession, (req, res) => {
