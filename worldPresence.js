@@ -1,10 +1,12 @@
 // Monde 3D (World) : presence des vrais joueurs.
 // Chaque joueur connecte envoie sa position ; le serveur lui renvoie celle des autres,
 // avec le skin ENREGISTRE SUR LEUR PROFIL (lu dans la base, jamais envoye par le client).
-// Les positions restent en memoire. Seul le statut courant de chaque joueur est conserve.
+// Les positions restent en memoire. Les statuts et les vocaux temporaires sont en base.
+import { randomUUID } from "node:crypto";
 import { Router } from "express";
 import { pool } from "./db.js";
 import { requireSession } from "./auth.js";
+import { sniffVoiceMime } from "./monopolyVoiceRules.js";
 
 export const worldPresenceRouter = Router();
 
@@ -13,9 +15,81 @@ const MAX_RETURN = 25;      // joueurs renvoyes au maximum a chaque appel
 const MAX_COORD = 2000;     // la ville fait environ 450 x 400 : tout ce qui depasse est refuse
 const INFO_REFRESH_MS = 60000;
 const STATUS_MAX_LENGTH = 180;
+const VOICE_DISTANCE = 8;
+const VOICE_MAX_MS = 30000;
+const VOICE_MAX_BYTES = 512 * 1024;
+const VOICE_TTL_MS = 90000;
+const VOICE_LIMIT = 64;
 
 const players = new Map();
+const voiceClips = new Map();
+let voiceTableReady;
+let voiceUploads = 0;
+let voiceCleanupBusy = false;
 let statusTableReady;
+
+function present(player, now) {
+  return Boolean(player?.t && now - player.t <= TTL_MS);
+}
+
+function ensureVoiceTable() {
+  if (!voiceTableReady) {
+    voiceTableReady = pool.query(
+      "create table if not exists maf_world_voice_clips (" +
+      "id uuid primary key, audio bytea not null, mime text not null, expires_at timestamptz not null)"
+    ).catch(error => {
+      voiceTableReady = null;
+      throw error;
+    });
+  }
+  return voiceTableReady;
+}
+
+async function pruneVoiceClips() {
+  if (voiceCleanupBusy) return;
+  voiceCleanupBusy = true;
+  const now = Date.now();
+  for (const [id, clip] of voiceClips) if (clip.expiresAt <= now) voiceClips.delete(id);
+  try {
+    await ensureVoiceTable();
+    await pool.query("delete from maf_world_voice_clips where expires_at <= now()");
+  } catch (error) {
+    console.error("world voice cleanup :", error.message);
+  } finally {
+    voiceCleanupBusy = false;
+  }
+}
+
+async function finishVoiceClips(userId, ids) {
+  const deleted = [];
+  for (const id of ids) {
+    const clip = voiceClips.get(id);
+    if (!clip?.listeners.delete(userId) || clip.listeners.size) continue;
+    voiceClips.delete(id);
+    deleted.push(id);
+  }
+  if (!deleted.length) return;
+  try {
+    await pool.query("delete from maf_world_voice_clips where id = any($1::uuid[])", [deleted]);
+  } catch (error) {
+    console.error("world voice delete :", error.message);
+  }
+}
+
+function voiceInbox(userId, now) {
+  const inbox = [];
+  for (const [id, clip] of voiceClips) {
+    if (clip.expiresAt <= now || clip.listeners.get(userId) !== false) continue;
+    inbox.push({ id, name: clip.name });
+    if (inbox.length >= 8) break;
+  }
+  return inbox;
+}
+
+if (pool) {
+  void pruneVoiceClips();
+  setInterval(pruneVoiceClips, 15000).unref();
+}
 
 function ensureStatusTable() {
   if (!statusTableReady) {
@@ -67,6 +141,88 @@ function prune(now = Date.now()) {
 }
 setInterval(() => prune(), 15000).unref();
 
+worldPresenceRouter.post("/voice", requireSession, async (req, res) => {
+  const sender = players.get(req.userId);
+  const now = Date.now();
+  if (!present(sender, now)) return res.status(409).json({ error: "Rejoins World avant d’envoyer un vocal." });
+  const { audio: encoded, ms } = req.body || {};
+  if (!Number.isInteger(ms) || ms < 300 || ms > VOICE_MAX_MS || typeof encoded !== "string" ||
+      encoded.length > Math.ceil(VOICE_MAX_BYTES / 3) * 4 || encoded.length % 4 ||
+      !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) {
+    return res.status(400).json({ error: "Vocal invalide ou trop long." });
+  }
+  const audio = Buffer.from(encoded, "base64");
+  const mime = sniffVoiceMime(audio);
+  if (!mime || audio.length > VOICE_MAX_BYTES) {
+    return res.status(400).json({ error: "Format audio non reconnu ou vocal trop lourd." });
+  }
+
+  const listeners = new Map();
+  for (const [id, player] of players) {
+    if (id !== req.userId && player.voice && present(player, now) &&
+        Math.hypot(player.x - sender.x, player.z - sender.z) <= VOICE_DISTANCE) {
+      listeners.set(id, false);
+    }
+  }
+  if (!listeners.size) return res.json({ count: 0 });
+  if (sender.voiceUploading || now - (sender.voiceSentAt || 0) < 1500 ||
+      voiceClips.size + voiceUploads >= VOICE_LIMIT) {
+    return res.status(429).json({ error: "Attends un instant avant un autre vocal." });
+  }
+
+  const id = randomUUID();
+  const expiresAt = now + VOICE_TTL_MS;
+  voiceUploads++;
+  sender.voiceUploading = true;
+  try {
+    await ensureVoiceTable();
+    await pool.query(
+      "insert into maf_world_voice_clips (id, audio, mime, expires_at) values ($1, $2, $3, $4)",
+      [id, audio, mime, new Date(expiresAt)]
+    );
+    for (const userId of listeners.keys()) {
+      const player = players.get(userId);
+      if (!present(player, Date.now()) || !player.voice) listeners.delete(userId);
+    }
+    if (listeners.size) {
+      voiceClips.set(id, { expiresAt, listeners, name: sender.name || "Joueur" });
+      sender.voiceSentAt = now;
+    } else {
+      await pool.query("delete from maf_world_voice_clips where id = $1", [id]);
+    }
+    res.json({ count: listeners.size });
+  } catch (error) {
+    console.error("world voice send :", error.message);
+    res.status(500).json({ error: "Impossible d’envoyer le vocal." });
+  } finally {
+    sender.voiceUploading = false;
+    voiceUploads--;
+  }
+});
+
+worldPresenceRouter.post("/voice/:id/listen", requireSession, async (req, res) => {
+  const { id } = req.params;
+  const clip = voiceClips.get(id);
+  if (!clip || clip.expiresAt <= Date.now() || clip.listeners.get(req.userId) !== false) {
+    return res.status(404).end();
+  }
+  clip.listeners.set(req.userId, true); // un seul retrait du fichier par destinataire
+  try {
+    const { rows: [row] } = await pool.query(
+      "select audio, mime from maf_world_voice_clips where id = $1 and expires_at > now()", [id]
+    );
+    if (!row || clip.listeners.get(req.userId) !== true || clip.expiresAt <= Date.now()) {
+      return res.status(404).end();
+    }
+    res.set({ "Content-Type": row.mime, "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff" });
+    res.send(row.audio);
+  } catch (error) {
+    if (clip.listeners.get(req.userId) === true) clip.listeners.set(req.userId, false);
+    console.error("world voice listen :", error.message);
+    res.status(500).end();
+  }
+});
+
 worldPresenceRouter.put("/status", requireSession, async (req, res) => {
   const text = req.body?.status;
   if (typeof text !== "string" || text.length > STATUS_MAX_LENGTH || text.includes("\0")) {
@@ -99,11 +255,13 @@ worldPresenceRouter.post("/presence", requireSession, async (req, res) => {
   }
   if (now - p.t > TTL_MS) p.infoAt = 0;   // il revient dans le monde : on relit son skin actuel
   const x = Number(b.x), z = Number(b.z), yaw = Number(b.yaw);
+  const wasListening = p.voice === true;
   if (Number.isFinite(x) && Number.isFinite(z) && Math.abs(x) <= MAX_COORD && Math.abs(z) <= MAX_COORD) {
     p.x = x; p.z = z;
     p.yaw = Number.isFinite(yaw) ? yaw : p.yaw;
     p.mv = b.mv ? 1 : 0;
     p.veh = b.veh ? 1 : 0;
+    p.voice = b.voice === true;
     p.t = now;
   }
   try {
@@ -111,10 +269,15 @@ worldPresenceRouter.post("/presence", requireSession, async (req, res) => {
   } catch (error) {
     console.error("world presence :", error.message);
   }
+  if (wasListening && !p.voice) {
+    await finishVoiceClips(userId, voiceClips.keys());
+  } else if (Array.isArray(b.voiceDone) && b.voiceDone.length) {
+    await finishVoiceClips(userId, b.voiceDone.slice(0, 16));
+  }
   const out = [];
   let onlineCount = 0;
   for (const [id, q] of players) {
-    if (!q.t || now - q.t > TTL_MS) continue;
+    if (!present(q, now)) continue;
     onlineCount++;
     if (id === userId || !q.name || out.length >= MAX_RETURN) continue;
     out.push({
@@ -123,10 +286,14 @@ worldPresenceRouter.post("/presence", requireSession, async (req, res) => {
       yaw: Math.round(q.yaw * 1000) / 1000, mv: q.mv, veh: q.veh,
     });
   }
-  res.json({ me: { name: p.name, skin: p.skin, status: p.status, statusVersion: p.statusVersion }, players: out, onlineCount });
+  res.json({
+    me: { name: p.name, skin: p.skin, status: p.status, statusVersion: p.statusVersion },
+    players: out, onlineCount, voices: p.voice ? voiceInbox(userId, now) : []
+  });
 });
 
-worldPresenceRouter.post("/leave", requireSession, (req, res) => {
+worldPresenceRouter.post("/leave", requireSession, async (req, res) => {
   players.delete(req.userId);
+  await finishVoiceClips(req.userId, voiceClips.keys());
   res.json({ ok: true });
 });
