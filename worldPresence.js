@@ -43,7 +43,8 @@ function claimVillaSeat(userId, id, x, z, now) {
   // Les 32 places d'origine gardent leur zone ; 33..39 sont dans le nouveau loft.
   const inVilla = id >= 1 && id <= 32 && x >= 75 && x <= 110 && z >= 242 && z <= 258;
   const inLoft = id >= 33 && id <= 39 && x >= 115 && x <= 124 && z >= 250 && z <= 263;
-  if (!Number.isInteger(id) || (!inVilla && !inLoft)) return null;
+  const inFastFood = id >= 40 && id <= 47 && x >= -109 && x <= -90 && z >= -302 && z <= -289;
+  if (!Number.isInteger(id) || (!inVilla && !inLoft && !inFastFood)) return null;
   for (const [otherId, other] of players) {
     if (otherId !== userId && other.seat === id && present(other, now)) return null;
   }
@@ -315,6 +316,58 @@ worldPresenceRouter.put("/status", requireSession, async (req, res) => {
     console.error("world status write :", error.message);
     res.status(500).json({ error: "Impossible d’enregistrer le statut. Réessaie." });
   }
+});
+
+// MAF-FOOD-V1. Energie sauvegardee en PostgreSQL, independante des FPS et de la session.
+// Au premier acces chaque compte demarre a 40; 100 points se vident en 24 h reelles.
+let energyTableReady;
+async function ensureEnergyTable() {
+  if (!energyTableReady) energyTableReady = pool.query(
+    `CREATE TABLE IF NOT EXISTS maf_world_energy (
+       user_id integer PRIMARY KEY REFERENCES maf_users(id) ON DELETE CASCADE,
+       energy double precision NOT NULL DEFAULT 40 CHECK (energy >= 0 AND energy <= 100),
+       updated_at timestamptz NOT NULL DEFAULT now(),
+       last_meal_at timestamptz)`
+  ).catch(error => { energyTableReady = null; throw error; });
+  await energyTableReady;
+}
+const ENERGY_PER_SECOND = 100 / 86400;
+function energyNow(row) {
+  return Math.max(0, Math.min(100, Number(row.energy) -
+    Math.max(0, (Date.now() - new Date(row.updated_at).getTime()) / 1000) * ENERGY_PER_SECOND));
+}
+worldPresenceRouter.get('/energy', requireSession, async (req, res) => {
+  try {
+    await ensureEnergyTable();
+    await pool.query('INSERT INTO maf_world_energy(user_id) VALUES ($1) ON CONFLICT DO NOTHING', [req.userId]);
+    const row = (await pool.query('SELECT energy, updated_at FROM maf_world_energy WHERE user_id=$1', [req.userId])).rows[0];
+    if (!row) return res.status(404).json({ error: 'Compte introuvable' });
+    return res.set('Cache-Control', 'no-store').json({ energy: energyNow(row), max: 100 });
+  } catch (error) { console.error('world energy:', error.message); return res.status(503).json({ error: 'Energie indisponible' }); }
+});
+worldPresenceRouter.post('/eat', requireSession, async (req, res) => {
+  const p = players.get(req.userId);
+  const fx = -100 - 2.5 * .75, fz = -310 + 6.2 * .75;
+  if (!present(p, Date.now()) || p.veh || p.x < -104.125 || p.x > -93.625 ||
+      p.z < -312.25 || Math.hypot(p.x - fx, p.z - fz) > 4.2) {
+    return res.status(403).json({ error: 'Approche-toi du comptoir du fastfood.' });
+  }
+  try {
+    await ensureEnergyTable();
+    // UPSERT atomique : deux clics simultanes ne peuvent crediter deux repas.
+    const sql = `INSERT INTO maf_world_energy(user_id, energy, updated_at, last_meal_at)
+      VALUES ($1, 90, now(), now())
+      ON CONFLICT (user_id) DO UPDATE SET
+      energy = LEAST(100, GREATEST(0, maf_world_energy.energy -
+        GREATEST(0, EXTRACT(EPOCH FROM (now() - maf_world_energy.updated_at))) * (100.0/86400)) + 50),
+      updated_at = now(), last_meal_at = now()
+      WHERE maf_world_energy.last_meal_at IS NULL OR
+            maf_world_energy.last_meal_at < now() - interval '2 seconds'
+      RETURNING energy`;
+    const row = (await pool.query(sql, [req.userId])).rows[0];
+    if (!row) return res.status(429).json({ error: 'Attends 2 secondes avant le repas suivant.' });
+    return res.set('Cache-Control', 'no-store').json({ energy: Number(row.energy), max: 100, gained: 50 });
+  } catch (error) { console.error('world eat:', error.message); return res.status(503).json({ error: 'Repas indisponible' }); }
 });
 
 worldPresenceRouter.post("/presence", requireSession, async (req, res) => {
