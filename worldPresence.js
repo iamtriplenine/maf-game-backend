@@ -112,16 +112,18 @@ worldPresenceRouter.post("/presence", requireSession, async (req, res) => {
     console.error("world presence :", error.message);
   }
   const out = [];
+  let onlineCount = 0;
   for (const [id, q] of players) {
-    if (id === userId || !q.name || now - q.t > TTL_MS) continue;
+    if (!q.t || now - q.t > TTL_MS) continue;
+    onlineCount++;
+    if (id === userId || !q.name || out.length >= MAX_RETURN) continue;
     out.push({
       id, name: q.name, skin: q.skin, status: q.status,
       x: Math.round(q.x * 100) / 100, z: Math.round(q.z * 100) / 100,
       yaw: Math.round(q.yaw * 1000) / 1000, mv: q.mv, veh: q.veh,
     });
-    if (out.length >= MAX_RETURN) break;
   }
-  res.json({ me: { name: p.name, skin: p.skin, status: p.status, statusVersion: p.statusVersion }, players: out });
+  res.json({ me: { name: p.name, skin: p.skin, status: p.status, statusVersion: p.statusVersion }, players: out, onlineCount });
 });
 
 worldPresenceRouter.post("/leave", requireSession, (req, res) => {
