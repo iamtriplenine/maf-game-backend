@@ -40,8 +40,10 @@ function present(player, now) {
 // IDs stables du catalogue VILLA_SEATS. Les places sont libérées à la
 // prochaine présence sans siège, à la déconnexion ou à l'expiration du joueur.
 function claimVillaSeat(userId, id, x, z, now) {
-  if (!Number.isInteger(id) || id < 1 || id > 32 ||
-      x < 75 || x > 110 || z < 242 || z > 258) return null;
+  // Les 32 places d'origine gardent leur zone ; 33..39 sont dans le nouveau loft.
+  const inVilla = id >= 1 && id <= 32 && x >= 75 && x <= 110 && z >= 242 && z <= 258;
+  const inLoft = id >= 33 && id <= 39 && x >= 115 && x <= 124 && z >= 250 && z <= 263;
+  if (!Number.isInteger(id) || (!inVilla && !inLoft)) return null;
   for (const [otherId, other] of players) {
     if (otherId !== userId && other.seat === id && present(other, now)) return null;
   }
