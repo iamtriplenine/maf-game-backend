@@ -43,7 +43,7 @@ function present(player, now) {
 const FOOD_SEAT_POINTS = [
   [-5, 14], [-5, 15.56], [-5, 17.93], [-5, 20.30],
   [7.94, 16.12], [7.94, 17.72], [7.94, 20.87], [7.94, 22.46]
-].map(([x,z]) => ({ x: -100 + x * .75, z: -310 + z * .75 }));
+].map(([x,z]) => ({ x: -86 + x * .75, z: -300 + z * .75 }));
 function claimVillaSeat(userId, id, x, z, now) {
   if (!Number.isInteger(id)) return { seat: null, reason: 'invalid' };
   const inVilla = id >= 1 && id <= 32 && x >= 75 && x <= 110 && z >= 242 && z <= 258;
@@ -356,8 +356,8 @@ worldPresenceRouter.post('/eat', requireSession, async (req, res) => {
   const p = players.get(req.userId);
   // Les caisses sont x=-3.26/-1.4/0.46, z=9.2 dans le GLB :
   // les clients se tiennent devant, vers z=11.4.
-  const fx = -100 - 1.5 * .75, fz = -310 + 11.4 * .75;
-  const lx = p && (p.x + 100) / .75, lz = p && (p.z + 310) / .75;
+  const fx = -86 - 1.5 * .75, fz = -300 + 11.4 * .75;
+  const lx = p && (p.x + 86) / .75, lz = p && (p.z + 300) / .75;
   if (!present(p, Date.now()) || p.veh ||
       lx <= -5.6 || lx >= 8.8 || lz <= 8.8 || lz >= 17 ||
       Math.hypot(p.x - fx, p.z - fz) > 4.4) {
