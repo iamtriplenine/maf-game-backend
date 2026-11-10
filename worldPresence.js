@@ -37,6 +37,17 @@ function present(player, now) {
   return Boolean(player?.t && now - player.t <= TTL_MS);
 }
 
+// IDs stables du catalogue VILLA_SEATS. Les places sont libérées à la
+// prochaine présence sans siège, à la déconnexion ou à l'expiration du joueur.
+function claimVillaSeat(userId, id, x, z, now) {
+  if (!Number.isInteger(id) || id < 1 || id > 32 ||
+      x < 75 || x > 110 || z < 242 || z > 258) return null;
+  for (const [otherId, other] of players) {
+    if (otherId !== userId && other.seat === id && present(other, now)) return null;
+  }
+  return id;
+}
+
 function voiceClientId(value) {
   return typeof value === "string" && /^[a-zA-Z0-9_-]{16,64}$/.test(value) ? value : null;
 }
@@ -321,6 +332,7 @@ worldPresenceRouter.post("/presence", requireSession, async (req, res) => {
     p.yaw = Number.isFinite(yaw) ? yaw : p.yaw;
     p.mv = b.mv ? 1 : 0;
     p.veh = b.veh ? 1 : 0;
+    p.seat = !p.veh && !p.mv ? claimVillaSeat(userId, b.seat, x, z, now) : null;
     p.chat = Boolean(client);
     p.voice = p.chat || b.voice === true;
     p.t = now;
@@ -342,11 +354,11 @@ worldPresenceRouter.post("/presence", requireSession, async (req, res) => {
     out.push({
       id, name: q.name, skin: q.skin, status: q.status,
       x: Math.round(q.x * 100) / 100, z: Math.round(q.z * 100) / 100,
-      yaw: Math.round(q.yaw * 1000) / 1000, mv: q.mv, veh: q.veh,
+      yaw: Math.round(q.yaw * 1000) / 1000, mv: q.mv, veh: q.veh, seat: q.seat ?? null,
     });
   }
   res.json({
-    me: { name: p.name, skin: p.skin, status: p.status, statusVersion: p.statusVersion },
+    me: { name: p.name, skin: p.skin, status: p.status, statusVersion: p.statusVersion, seat: p.seat ?? null },
     players: out, onlineCount,
     voices: p.voice ? voiceInbox(userId, now, client) : [],
     chat: client ? chatInbox(userId, now) : []
