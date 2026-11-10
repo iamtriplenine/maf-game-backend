@@ -28,11 +28,55 @@ const CHAT_MAX_LENGTH = 160;
 const players = new Map();
 const voiceClips = new Map();
 const chatMessages = new Map();
+// MAF-PARKED-CARS-V3 : derniere voiture garee de chaque compte, y compris hors ligne.
+const parkedCars = new Map();
+let parkedCarsReady;
 let voiceTableReady;
 let voiceUploads = 0;
 let voiceCleanupBusy = false;
 let statusTableReady;
 
+function parkedPayload(car, player) {
+  if (!car || typeof car!=='object' || !['coupe','pickup','van','buggy'].includes(car.type)) return null;
+  const x=Number(car.x),z=Number(car.z),yaw=Number(car.yaw);
+  if (![x,z,yaw].every(Number.isFinite) || Math.abs(x)>MAX_COORD ||
+      Math.abs(z)>MAX_COORD || Math.abs(yaw)>1000) return null;
+  if (Math.hypot(x-player.x,z-player.z)>(player.veh?3:8)) return null;
+  return {type:car.type,x:Math.round(x*100)/100,z:Math.round(z*100)/100,
+    yaw:Math.round(yaw*1000)/1000};
+}
+function ensureParkedCars() {
+  if (!parkedCarsReady) {
+    parkedCarsReady=(async()=>{
+      await pool.query('create table if not exists maf_world_parked_cars ('+
+        'user_id integer primary key references maf_users(id) on delete cascade,'+
+        'car_type varchar(16) not null, x double precision not null,'+
+        'z double precision not null, yaw double precision not null, updated_at timestamptz not null default now())');
+      const {rows}=await pool.query('select user_id,car_type,x,z,yaw from maf_world_parked_cars');
+      for (const r of rows) if (['coupe','pickup','van','buggy'].includes(r.car_type)) {
+        parkedCars.set(r.user_id,{type:r.car_type,x:Number(r.x),z:Number(r.z),yaw:Number(r.yaw)});
+      }
+    })().catch(e=>{parkedCarsReady=null;throw e;});
+  }
+  return parkedCarsReady;
+}
+async function updateParkedCar(userId,car,driving) {
+  await ensureParkedCars();
+  if (driving) {
+    if (parkedCars.has(userId)) {
+      await pool.query('delete from maf_world_parked_cars where user_id=$1',[userId]);
+      parkedCars.delete(userId);
+    }
+    return;
+  }
+  const old=parkedCars.get(userId);
+  if (old && old.type===car.type && old.x===car.x && old.z===car.z && old.yaw===car.yaw) return;
+  await pool.query('insert into maf_world_parked_cars(user_id,car_type,x,z,yaw) '+
+    'values($1,$2,$3,$4,$5) on conflict(user_id) do update set '+
+    'car_type=excluded.car_type,x=excluded.x,z=excluded.z,yaw=excluded.yaw,updated_at=now()',
+    [userId,car.type,car.x,car.z,car.yaw]);
+  parkedCars.set(userId,car);
+}
 function present(player, now) {
   return Boolean(player?.t && now - player.t <= TTL_MS);
 }
@@ -406,6 +450,17 @@ worldPresenceRouter.post("/presence", requireSession, async (req, res) => {
     p.voice = p.chat || b.voice === true;
     p.t = now;
   }
+  // La position du vehicule est toujours liee au compte authentifie.
+  // Sauvegarde en base UNIQUEMENT apres stationnement, jamais a chaque image.
+  const car=parkedPayload(b.car,p);
+  if (car) {
+    try { await updateParkedCar(userId,car,!!p.veh); }
+    catch(error) { console.error('world parked cars:',error.message); }
+  } else if (b.wantParked === true) {
+    // Les visiteurs sans voiture doivent eux aussi retrouver les parkings en base.
+    try { await ensureParkedCars(); }
+    catch(error) { console.error('world parked cars load:',error.message); }
+  }
   try {
     await refreshIdentity(userId, p);
   } catch (error) {
@@ -427,9 +482,10 @@ worldPresenceRouter.post("/presence", requireSession, async (req, res) => {
     });
   }
   res.json({
-    me: { name: p.name, skin: p.skin, status: p.status, statusVersion: p.statusVersion,
+    me: { id: userId, name: p.name, skin: p.skin, status: p.status, statusVersion: p.statusVersion,
       seat: p.seat ?? null, seatError: p.seatError ?? null },
     players: out, onlineCount,
+    parkedCars: b.wantParked === true ? Array.from(parkedCars,([id,c])=>({id,...c})).slice(0,500) : undefined,
     voices: p.voice ? voiceInbox(userId, now, client) : [],
     chat: client ? chatInbox(userId, now) : []
   });
