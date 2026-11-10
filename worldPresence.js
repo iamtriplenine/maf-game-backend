@@ -39,16 +39,23 @@ function present(player, now) {
 
 // IDs stables du catalogue VILLA_SEATS. Les places sont libérées à la
 // prochaine présence sans siège, à la déconnexion ou à l'expiration du joueur.
+// MAF-FOOD-FIX-V2 : id et zone verifies ensemble, motif de refus explicite.
+const FOOD_SEAT_POINTS = [
+  [-5, 14], [-5, 15.56], [-5, 17.93], [-5, 20.30],
+  [7.94, 16.12], [7.94, 17.72], [7.94, 20.87], [7.94, 22.46]
+].map(([x,z]) => ({ x: -100 + x * .75, z: -310 + z * .75 }));
 function claimVillaSeat(userId, id, x, z, now) {
-  // Les 32 places d'origine gardent leur zone ; 33..39 sont dans le nouveau loft.
+  if (!Number.isInteger(id)) return { seat: null, reason: 'invalid' };
   const inVilla = id >= 1 && id <= 32 && x >= 75 && x <= 110 && z >= 242 && z <= 258;
   const inLoft = id >= 33 && id <= 39 && x >= 115 && x <= 124 && z >= 250 && z <= 263;
-  const inFastFood = id >= 40 && id <= 47 && x >= -109 && x <= -90 && z >= -302 && z <= -289;
-  if (!Number.isInteger(id) || (!inVilla && !inLoft && !inFastFood)) return null;
+  const food = id >= 40 && id <= 47 ? FOOD_SEAT_POINTS[id-40] : null;
+  const inFastFood = food && Math.hypot(x - food.x, z - food.z) <= 2.5;
+  if (!inVilla && !inLoft && !inFastFood) return { seat: null, reason: 'out_of_range' };
   for (const [otherId, other] of players) {
-    if (otherId !== userId && other.seat === id && present(other, now)) return null;
+    if (otherId !== userId && other.seat === id && present(other, now))
+      return { seat: null, reason: 'occupied' };
   }
-  return id;
+  return { seat: id, reason: null };
 }
 
 function voiceClientId(value) {
@@ -347,10 +354,14 @@ worldPresenceRouter.get('/energy', requireSession, async (req, res) => {
 });
 worldPresenceRouter.post('/eat', requireSession, async (req, res) => {
   const p = players.get(req.userId);
-  const fx = -100 - 2.5 * .75, fz = -310 + 6.2 * .75;
-  if (!present(p, Date.now()) || p.veh || p.x < -104.125 || p.x > -93.625 ||
-      p.z < -312.25 || Math.hypot(p.x - fx, p.z - fz) > 4.2) {
-    return res.status(403).json({ error: 'Approche-toi du comptoir du fastfood.' });
+  // Les caisses sont x=-3.26/-1.4/0.46, z=9.2 dans le GLB :
+  // les clients se tiennent devant, vers z=11.4.
+  const fx = -100 - 1.5 * .75, fz = -310 + 11.4 * .75;
+  const lx = p && (p.x + 100) / .75, lz = p && (p.z + 310) / .75;
+  if (!present(p, Date.now()) || p.veh ||
+      lx <= -5.6 || lx >= 8.8 || lz <= 8.8 || lz >= 17 ||
+      Math.hypot(p.x - fx, p.z - fz) > 4.4) {
+    return res.status(403).json({ error: 'Approche-toi des caisses du fastfood pour manger.' });
   }
   try {
     await ensureEnergyTable();
@@ -387,7 +398,10 @@ worldPresenceRouter.post("/presence", requireSession, async (req, res) => {
     p.yaw = Number.isFinite(yaw) ? yaw : p.yaw;
     p.mv = b.mv ? 1 : 0;
     p.veh = b.veh ? 1 : 0;
-    p.seat = !p.veh && !p.mv ? claimVillaSeat(userId, b.seat, x, z, now) : null;
+    const seatClaim = !p.veh && b.seat != null ? claimVillaSeat(userId, b.seat, x, z, now) : null;
+    p.seat = seatClaim?.seat ?? null;
+    p.seatError = seatClaim?.reason ?? null;
+    if (p.seat) p.mv = 0; // pas d'ejection pour une vitesse residuelle transmise
     p.chat = Boolean(client);
     p.voice = p.chat || b.voice === true;
     p.t = now;
@@ -413,7 +427,8 @@ worldPresenceRouter.post("/presence", requireSession, async (req, res) => {
     });
   }
   res.json({
-    me: { name: p.name, skin: p.skin, status: p.status, statusVersion: p.statusVersion, seat: p.seat ?? null },
+    me: { name: p.name, skin: p.skin, status: p.status, statusVersion: p.statusVersion,
+      seat: p.seat ?? null, seatError: p.seatError ?? null },
     players: out, onlineCount,
     voices: p.voice ? voiceInbox(userId, now, client) : [],
     chat: client ? chatInbox(userId, now) : []
