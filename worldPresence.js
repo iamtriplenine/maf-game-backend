@@ -7,8 +7,10 @@ import { Router } from "express";
 import { pool } from "./db.js";
 import { requireSession } from "./auth.js";
 import { sniffVoiceMime } from "./monopolyVoiceRules.js";
+import { worldCarsRouter, usableCar } from "./worldCars.js"; // MAF-WORLD-CARS-V3
 
 export const worldPresenceRouter = Router();
+worldPresenceRouter.use("/cars", worldCarsRouter);
 
 const TTL_MS = 7000;        // un joueur sans signe de vie depuis 7 s disparait
 const MAX_RETURN = 25;      // joueurs renvoyes au maximum a chaque appel
@@ -469,6 +471,7 @@ worldPresenceRouter.post("/presence", requireSession, async (req, res) => {
   if (Array.isArray(b.voiceDone) && b.voiceDone.length) {
     await finishVoiceClips(userId, b.voiceDone.slice(0, 16), client);
   }
+  p.carId = await usableCar(userId, b.carId);   // seule une voiture reellement possedee est relayee aux autres
   const out = [];
   let onlineCount = 0;
   for (const [id, q] of players) {
@@ -478,7 +481,7 @@ worldPresenceRouter.post("/presence", requireSession, async (req, res) => {
     out.push({
       id, name: q.name, skin: q.skin, status: q.status,
       x: Math.round(q.x * 100) / 100, z: Math.round(q.z * 100) / 100,
-      yaw: Math.round(q.yaw * 1000) / 1000, mv: q.mv, veh: q.veh, seat: q.seat ?? null,
+      yaw: Math.round(q.yaw * 1000) / 1000, mv: q.mv, veh: q.veh, seat: q.seat ?? null, carId: q.carId || "porsche-911-gt3-rs",
     });
   }
   res.json({
