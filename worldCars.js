@@ -8,7 +8,7 @@ import { requireSession } from "./auth.js";
 import { isOwnerAccount } from "./accountRoles.js";
 
 export const DEFAULT_CAR = "porsche-911-gt3-rs";
-export const EXCLUSIVE_CARS = Object.freeze(["lamborghini-veneno-roadster"]);
+export const EXCLUSIVE_CARS = Object.freeze(["lamborghini-veneno-roadster", "mercedes-amg-one"]);
 export const worldCarsRouter = Router();
 
 const CACHE_MS = 30000;
