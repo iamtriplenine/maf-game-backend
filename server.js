@@ -27,6 +27,7 @@ import { monopolyRoomsRouter, maintainMonopolyRooms } from "./monopolyRooms.js";
 import { monopolyVoicesRouter, ensureMonopolyVoices } from "./monopolyVoices.js";
 import { historyRouter } from "./history.js";
 import { missRouter } from "./missVotes.js"; // MAF_MISS_V1
+import { missAdminRouter } from "./missAdmin.js"; // MAF_MISS_ADMIN_V1
 import { worldPresenceRouter } from "./worldPresence.js"; // MAF_WORLD_PRESENCE_V1
 import { worldBillboardsRouter } from "./worldBillboards.js"; // MAF_WORLD_BILLBOARDS_V1
 import { ownerNotificationsRouter } from "./ownerNotifications.js"; // MAF_OWNER_ALERTS_V1
@@ -36,6 +37,7 @@ import {tournamentDuelRouter,maintainTournamentDuels} from './tournamentDuel.js'
 const app = express();
 // Derriere Render : l'adresse du visiteur vient du proxy (non falsifiable), pas d'un en-tete envoye par le client.
 app.set("trust proxy", 1);
+app.use("/api/miss-admin", missAdminRouter); // MAF_MISS_ADMIN_V1
 app.use(express.json({ limit: "3mb" }));
 
 // Adresses du site autorisees a appeler ce serveur (separees par des virgules).
