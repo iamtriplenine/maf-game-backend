@@ -26,6 +26,7 @@ import { roomsRouter, maintainRooms } from "./rooms.js";
 import { monopolyRoomsRouter, maintainMonopolyRooms } from "./monopolyRooms.js";
 import { monopolyVoicesRouter, ensureMonopolyVoices } from "./monopolyVoices.js";
 import { historyRouter } from "./history.js";
+import { missRouter } from "./missVotes.js"; // MAF_MISS_V1
 import { worldPresenceRouter } from "./worldPresence.js"; // MAF_WORLD_PRESENCE_V1
 import { worldBillboardsRouter } from "./worldBillboards.js"; // MAF_WORLD_BILLBOARDS_V1
 import { ownerNotificationsRouter } from "./ownerNotifications.js"; // MAF_OWNER_ALERTS_V1
@@ -89,6 +90,7 @@ app.use("/api/tournaments", tournamentGiftRouter);
 app.use("/api/gifts", ownerGiftsRouter);
 app.use("/api/history", historyRouter);
 app.use("/api/world/billboards", worldBillboardsRouter); // MAF_WORLD_BILLBOARDS_V1
+app.use("/api/miss", missRouter); // MAF_MISS_V1
 app.use("/api/world", worldPresenceRouter); // MAF_WORLD_PRESENCE_V1
 app.use("/api", partnerAccountsRouter);
 app.use("/api/owner", ownerNotificationsRouter);
