@@ -19,6 +19,7 @@ import { tournamentPenaltyAwardsRouter, maintainPenaltyTournamentAwards } from "
 import { pool } from "./db.js";
 import { ownerGiftsRouter } from "./ownerGifts.js";
 import { ownerDbExportRouter } from "./ownerDbExport.js"; // MAF-DB-EXPORT-V1
+import { ownerUsersExportRouter } from "./ownerUsersExport.js"; // MAF-USERS-TEXT-V1
 import { authRouter } from "./auth.js";
 import { chatRouter } from "./chat.js";
 import { roomsRouter, maintainRooms } from "./rooms.js";
@@ -92,6 +93,7 @@ app.use("/api/world", worldPresenceRouter); // MAF_WORLD_PRESENCE_V1
 app.use("/api", partnerAccountsRouter);
 app.use("/api/owner", ownerNotificationsRouter);
 app.use("/api/owner", ownerDbExportRouter); // MAF-DB-EXPORT-V1
+app.use("/api/owner", ownerUsersExportRouter); // MAF-USERS-TEXT-V1
 app.use((error, _req, res, _next) => {
   if (error.type === "entity.too.large") return res.status(413).json({ error: "Capture trop volumineuse (2 Mo maximum)." });
   if (error.type === "entity.parse.failed") return res.status(400).json({ error: "JSON invalide." });
